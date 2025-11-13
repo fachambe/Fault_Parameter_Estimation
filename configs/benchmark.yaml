@@ -1,0 +1,58 @@
+# configs/benchmark.yaml
+device: "cuda"
+dataset_id: "fixed_v1_2-10MHz_F500"   # include range + F to avoid mixups
+seed: 5692
+force: True #Force to regenerate dataset
+plot_loglikelihood: False #Plot log-likelihood with respect to parameter of interest at each SNR
+
+snr_dbs: [0,5,10,15,20,25,30,35,40]
+
+test_per_snr: 1000
+train_per_snr: 1000
+
+freq:
+  start_hz: 2000000        # 2e6
+  stop_hz: 10000000       # 10e6
+  num_points: 500
+
+target: "ALL3SP" #L1, ZF, ZL, ALL3sameparams (ALL3SP), ALL3diffparams (ALL3DP)
+#ALL3SP means that the same triplet (ZF, ZL, L1) are used to generate all observations. Only difference is the Gaussian noise added to each.
+#ALL3DP means that different triplets (ZF, ZL, L1) are used to generate all observations. Gaussian noise is still added to each. 
+estimate: real #"real", "imag", or None. Only applies to 1D case. 
+
+fixed: 
+  L1: 250.0
+  ZF: {re: 100.0, im: 50.0}
+  ZL: {re: 50.0,  im: -5.0}
+
+true_range:
+  L1: {min: 1.0, max: 1000.0}             
+  ZF:
+    re: {min: 1.0,  max: 2000.0}
+    im: {min: -100.0,   max: 100.0}
+  ZL:
+    re: {min: 1.0,   max: 200.0}
+    im: {min: -100.0,  max: 100.0}
+
+# USED ONLY FOR 1D MLE grid search and ELBO-argmax μ grid search
+grid:
+  L1: {min: 1.0, max: 1000.0, num: 1000}
+  ZF:
+    re: {min: 1.0, max: 10000.0, num: 1000}
+    im: {min: -10000.0, max: 10000.0, num: 1000}
+  ZL:
+    re: {min: 1.0, max: 10000.0,  num: 1000}
+    im: {min: -10000.0, max: 10000.0,  num: 1000}
+
+
+# --- VI (ELBO-argmax μ) config ---
+vi_elbo1d:
+  mu_grid: {min: -6.0, max: 6.0, num: 500}
+  fixed_sigma: 0.02
+  M: 200     # MC samples for ELBO
+  K: 100    # MC samples for posterior mean
+  sigma_schedule:
+    sigma_max: 0.05
+    sigma_min: 0.002
+    alpha: 1.0
+    ref_db: 0.0
