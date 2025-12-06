@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+
+# Data files
+*.npz
+*.mat
+
+# Plots / figures
+figures/
+
+# VS Code
+.vscode/
+

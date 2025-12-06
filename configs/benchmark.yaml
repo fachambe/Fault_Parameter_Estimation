@@ -2,10 +2,10 @@
 device: "cuda"
 dataset_id: "fixed_v1_2-10MHz_F500"   # include range + F to avoid mixups
 seed: 5692
-force: True #Force to regenerate dataset
+force: False #Force to regenerate dataset
 plot_loglikelihood: False #Plot log-likelihood with respect to parameter of interest at each SNR
 
-snr_dbs: [0,5,10,15,20,25,30,35,40]
+snr_dbs: [40]
 
 test_per_snr: 1000
 train_per_snr: 1000
@@ -18,12 +18,12 @@ freq:
 target: "ALL3SP" #L1, ZF, ZL, ALL3sameparams (ALL3SP), ALL3diffparams (ALL3DP)
 #ALL3SP means that the same triplet (ZF, ZL, L1) are used to generate all observations. Only difference is the Gaussian noise added to each.
 #ALL3DP means that different triplets (ZF, ZL, L1) are used to generate all observations. Gaussian noise is still added to each. 
-estimate: real #"real", "imag", or None. Only applies to 1D case. 
+estimate: None #"real", "imag", or None. Only applies to 1D case. 
 
 fixed: 
   L1: 250.0
-  ZF: {re: 100.0, im: 50.0}
-  ZL: {re: 50.0,  im: -5.0}
+  ZF: {re: 1000.0, im: 50.0}
+  ZL: {re: 100.0,  im: -5.0}
 
 true_range:
   L1: {min: 1.0, max: 1000.0}             

@@ -3,7 +3,7 @@ import torch
 from estimators.base import Estimator
 
 class GridSearchMLE(Estimator):
-    def __init__(self, forward_model, likelihood, grid,
+    def __init__(self, fm, likelihood, grid,
                  target, fixed, device,
                  cand_batch=4096, obs_batch=64, estimate=None):
         """
@@ -16,7 +16,7 @@ class GridSearchMLE(Estimator):
         estimate: None | "real" | "imag"
             - For ZF/ZL: choose which component to estimate. Other component held fixed.
         """
-        self.fm, self.lik = forward_model, likelihood   # likelihood instance
+        self.fm, self.lik = fm, likelihood 
         self.target = target
         self.fixed = fixed
         self.device = device
@@ -49,8 +49,10 @@ class GridSearchMLE(Estimator):
         best_idx = torch.zeros(N, dtype=torch.long, device=device)
 
         for s in range(0, K, self.cand_batch_size):
+
             cand = self.grid[s:s+self.cand_batch_size]         # [c]
             c = cand.numel()           # [c]
+
             # Build parameter triplets [c] for this batch
             if self.target == "L1":
                 L1 = cand.to(dtype=torch.float32, device=device)
@@ -89,4 +91,8 @@ class GridSearchMLE(Estimator):
                 best_ll[cur]  = torch.where(take, ll_max, best_ll[cur]) #Updates the running best scores only where take is True
                 best_idx[cur] = torch.where(take, s + idx_local, best_idx[cur]) #Update the running best indices only where take is True
         
-        return self.grid[best_idx].detach().cpu().numpy()    # [N] best candidates from grid for all N observations
+
+        return {
+            "L1": self.grid[best_idx].detach().cpu().numpy(), # [N] best candidates from grid for all N observations
+        }
+        

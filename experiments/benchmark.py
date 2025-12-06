@@ -333,12 +333,12 @@ def main(cfg_path="configs/benchmark.yaml"):
         verbose=1
     )
 
-    print("Training GBR...")
-    gbr.fit(X_train, y_train)
-    print("Training RF...")
-    rf.fit(X_train, y_train)
-    print("Done Training...")
-    ml_models = {f"GBR (ML) for {text_param}": gbr, f"RF (ML) for {text_param}": rf}
+    # print("Training GBR...")
+    # gbr.fit(X_train, y_train)
+    # print("Training RF...")
+    # rf.fit(X_train, y_train)
+    # print("Done Training...")
+    # ml_models = {f"GBR (ML) for {text_param}": gbr, f"RF (ML) for {text_param}": rf}
 
 
     # Estimators
@@ -455,7 +455,7 @@ def main(cfg_path="configs/benchmark.yaml"):
 
     rmse = {}
     rmse.update({name: [] for name in estimators.keys()})
-    rmse.update({name: [] for name in ml_models.keys()})
+    # rmse.update({name: [] for name in ml_models.keys()})
     crlb_line = []
 
 
@@ -467,17 +467,17 @@ def main(cfg_path="configs/benchmark.yaml"):
         var = torch.tensor(test["noise_var"], device=device)   # [N,F]
 
         #ML Models Prediction
-        X_test = make_X_from_test(test, snr_db=snr_db, include_snr_feature=True)
-        for name, model in ml_models.items():
-            y_pred = model.predict(X_test).astype(np.float32)
-            e = rmse_for_target(y_pred, test, target, estimate)
-            rmse[name].append(e)
-            print(f"SNR {snr_db:>2} dB | {name} RMSE = {e:.3f}")
+        # X_test = make_X_from_test(test, snr_db=snr_db, include_snr_feature=True)
+        # for name, model in ml_models.items():
+        #     y_pred = model.predict(X_test).astype(np.float32)
+        #     e = rmse_for_target(y_pred, test, target, estimate)
+        #     rmse[name].append(e)
+        #     print(f"SNR {snr_db:>2} dB | {name} RMSE = {e:.3f}")
         #Plot Log likelihood
-        if(plot_likelihood):
-            true_val = get_true_param_for_sample(test, target=target, estimate=estimate, i=0)
-            plot_log_likelihood(fm, ComplexGaussianLik(), h_obs[0], var[0], 
-                                target=target, estimate=estimate, grid=grid, fixed=cfg["fixed"], true_val=true_val, snr_db = snr_db)
+        # if(plot_likelihood):
+        #     true_val = get_true_param_for_sample(test, target=target, estimate=estimate, i=0)
+        #     plot_log_likelihood(fm, ComplexGaussianLik(), h_obs[0], var[0], 
+        #                         target=target, estimate=estimate, grid=grid, fixed=cfg["fixed"], true_val=true_val, snr_db = snr_db)
             
         #CRLB Calculations
         du_aug = complex_partials_fullbatch(fm, test, device)   # [N, F, 5] complex

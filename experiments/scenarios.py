@@ -89,7 +89,7 @@ def main(cfg_path="configs/benchmark.yaml"):
     # --- Load full arrays from the .mat (assumed in /experiments) ---
     mat = sio.loadmat("experiments/cable_parameter.mat")
     gamma_full = torch.tensor(mat["gamma"].squeeze(), dtype=torch.cfloat, device=device)
-    Zc_full    = torch.tensor(mat["Z_C"].squeeze(),   dtype=torch.cfloat, device=device)
+    Zc_full    = torch.tensor(mat["Z_C"].squeeze(), dtype=torch.cfloat, device=device)
     pul_freq   = torch.tensor(mat["pulFreq"].squeeze(), dtype=torch.float32, device=device) 
 
     fstart = float(cfg["freq"]["start_hz"])
@@ -143,17 +143,7 @@ def main(cfg_path="configs/benchmark.yaml"):
         fm=fm,
         likelihood=ComplexGaussianLik(),
         L = 1000.0,
-        device=device,
-        adam_steps=400,
-        adam_lr=1e-3,
-        use_lbfgs=True,
-        lbfgs_steps=40,
-        # L1 profiling parameters
-        profile_L1=True,
-        L1_grid_points=250,   
-        inner_steps=6,       
-        inner_lr=1e-2,
-        profile_topk=3        # keep the 3 best L1 locations as starting points
+        device=device
     )
 
     mu_grid = torch.linspace(float(cfg["vi_elbo1d"]["mu_grid"]["min"]), float(cfg["vi_elbo1d"]["mu_grid"]["max"]), int(cfg["vi_elbo1d"]["mu_grid"]["num"]),
@@ -171,32 +161,70 @@ def main(cfg_path="configs/benchmark.yaml"):
         device = device
     )
 
+    target2 = "L1"
+    est5 = GridSearchMLE(
+        fm = fm,
+        likelihood = ComplexGaussianLik(),
+        grid = torch.linspace(100, 900, 400, device=device),
+        target = target2,
+        fixed = fixed,
+        device = device,
+        estimate = estimate
+    )
+
+    est6 = ELBOArgmaxMu1D(
+        fm = fm,
+        target = target2,
+        estimate = estimate,
+        L1_grid = torch.linspace(100, 900, 400, device=device),
+        fixed_sigma = 0.005,
+        fixed = fixed,
+        M = 200,
+        K = 100
+    )
+
 
   
 
-
-    rmse_curves = {k: [] for k in ["L1","ZF","ZL"]} #dict of RMSE values for each parameter
+    rmse_curves = {
+        "mle_optimized": {k: [] for k in ["L1", "ZF", "ZL"]},
+        "elbo_optimized": {k: [] for k in ["L1", "ZF", "ZL"]},
+    }
+    #rmse_curves = {k: [] for k in ["L1","ZF","ZL"]} #dict of RMSE values for each parameter
+#     rmse_curves = {
+#     "grid": {k: [] for k in ["L1", "ZF", "ZL"]},
+#     "elbo": {k: [] for k in ["L1", "ZF", "ZL"]},
+# }
+    
+    
     crlb_curves = {k: [] for k in ["L1","ZF","ZL"]}
     for snr_db in snrs:
         test = dm.build_or_load_dataset(cfg["dataset_id"], snr_db, N_test, gamma_list, Zc_list, seed = seed, 
                                      target=target, fixed=fixed, gen_cfg=cfg["true_range"], freq_cfg=cfg["freq"], 
                                      force=cfg["force"], desired_freq=pul_freq[idx], estimate=estimate, split="test")
-        h_obs = torch.tensor(test["h_obs_real"], device=device) + 1j*torch.tensor(test["h_obs_imag"], device=device)  # [N,F]
-        var = torch.tensor(test["noise_var"], device=device)   # [N,F]
-
-        print(f"Curr SNR is {snr_db}")
-        # Joint MLE 
-        preds = est4.predict(h_obs, var)
-        # preds = est2.predict(h_obs, var)
-        #preds2 = est2.predict(h_obs, var)
-        # preds = est1.predict_batch(h_obs, var)
-        # print("preds1", preds1)
-        # print("preds2", preds2)
-        #, test["L1_true"], test["ZF_true_re"], test["ZF_true_im"], test["ZL_true_re"], test["ZL_true_im"]) #dict of arrays
-        #
-        print("preds", preds)
+        h_obs = torch.tensor(test["h_obs_real"], device=device) + 1j*torch.tensor(test["h_obs_imag"], device=device)  # [M,F]
+        var = torch.tensor(test["noise_var"], device=device)   # [M,F]
         
-        r = rmse_joint(preds, test) #dict of floats - one single RMSE per SNR as we want
+        print(f"Curr SNR is {snr_db}")
+
+        preds_optimizedmle = est2.predict(h_obs, var)
+        rmse_optimizedmle = rmse_joint(preds_optimizedmle, test)
+        print("RMSE from MLE Optimized", rmse_optimizedmle)
+        
+        preds_optimizedelbo = est4.predict(h_obs, var, snr_db)
+        rmse_optimizedelbo = rmse_joint(preds_optimizedelbo, test)
+        print("RMSE from ELBO Optimized", rmse_optimizedelbo)
+
+        # Joint MLE 
+        # est2.debug_plot_L1_nll(h_obs, var, example_idx=0, num_L1=800)
+        # preds_elbo = est6.predict(h_obs, var)
+        # rmse_elbo = rmse_joint(preds_elbo, test)["L1"]
+        # print("RMSE from 1D ELBO    ", rmse_elbo)
+        
+        # preds_grid = est5.predict(h_obs, var)
+        # rmse_grid  = rmse_joint(preds_grid, test)["L1"]
+        # print("RMSE from grid       ", rmse_grid)
+        
 
         du_aug = complex_partials_fullbatch(fm, test, device)   # [N, F, 5] complex
         FIM = fim_from_complex_jac(du_aug, var) # [N, 5, 5] Augmented FIM matrix
@@ -228,30 +256,47 @@ def main(cfg_path="configs/benchmark.yaml"):
         for k, v in c.items():
             crlb_curves.setdefault(k, []).append(v.detach().cpu().numpy().item())
 
-        for k in rmse_curves: 
-            print(f"Parameter is {k}, RMSE is {r[k]}")
-            rmse_curves[k].append(r[k])
-        
-        
-    
+        for k in ["L1", "ZF", "ZL"]:
+            val = rmse_optimizedmle[k]        # this is the scalar RMSE for that param
+            val2 = rmse_optimizedelbo[k]
+            if torch.is_tensor(val):          # make it a plain float if it's a tensor
+                val = val.detach().cpu().item()
+                val2 = val2.detach().cpu().item()
 
+            print(f"Parameter is {k}, RMSE is {val}")
+            rmse_curves["mle_optimized"][k].append(val)
+            print(f"Parameter is {k}, RMSE is {val2}")
+            rmse_curves["elbo_optimized"][k].append(val2)
+        
+        
     end_time = time.perf_counter()
     elapsed_time = end_time - start_time
     print(f"Program took {elapsed_time:.4f} seconds to run.")
     plt.figure()
-
     base_names = sorted(set(list(rmse_curves.keys()) + list(crlb_curves.keys())))
     palette = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     color_map = {bn: palette[i % len(palette)] for i, bn in enumerate(base_names)}
-    for name, series in rmse_curves.items():
-        plt.plot(snrs, series, marker='o', label=name,color=color_map[name])
-    for name, series in crlb_curves.items():
+
+    # --- RMSE curves ---
+    for est_name, per_param in rmse_curves.items():
+        for param_name, series in per_param.items():   # series is the list for 'L1' / 'ZF' / 'ZL'
+            if not series:        # skip if it's still empty
+                continue
+            plt.plot(
+                snrs,
+                series,
+                marker="o",
+                label=f"{est_name} {param_name}",
+            )
+            
+    # --- sqrt(CRLB) curves ---
+    for name, series in crlb_curves.items(): 
         plt.plot(snrs, series, marker='x', linestyle='--', label=fr'$\sqrt{{\mathrm{{CRLB}}}}$ for {name}', color=color_map[name])
-    #plt.plot(snrs, crlb_line, marker='x', linestyle='--', label=fr'$\sqrt{{\mathrm{{CRLB}}}}$ for {latex_param}')
+
     plt.xlabel("SNR (dB)")
     plt.yscale("log")
     plt.ylabel("RMSE and sqrt(CRLB)")
-    plt.title(fr"Estimator RMSE vs $\sqrt{{\mathrm{{CRLB}}}}$ across SNR for {latex_param}")
+    plt.title(fr"Estimator RMSE vs $\sqrt{{\mathrm{{CRLB}}}}$ across SNR for L1")
     plt.grid(True)
     plt.legend(fontsize="x-small")
     plt.tight_layout()

@@ -113,7 +113,10 @@ class DatasetManager:
         L1_t = torch.tensor(L1_true, dtype=torch.float32, device=self.device)   # [N]
         ZF_t = torch.tensor(ZF_true, dtype=torch.cfloat,  device=self.device)   # [N]
         ZL_t = torch.tensor(ZL_true, dtype=torch.cfloat,  device=self.device)   # [N]
+        
+
         H_true = fm.compute_H_complex(L1=L1_t, ZF=ZF_t, ZL=ZL_t)                 # [N,F] cfloat
+
 
         # import matplotlib.pyplot as plt
         # plt.title(f'ZF = {ZF_t[0]} at SNR = {snr_db}')
