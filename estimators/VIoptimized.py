@@ -56,15 +56,15 @@ class VIoptimized(Estimator):
                  L: float = 1000.0,
                  device="cuda",
                  # VI hyperparams
-                 svi_steps: int = 6000,
+                 svi_steps: int = 3000,
                  svi_lr: float = 1e-2,
                  first_stage_num_particles: int = 100, # of Monte Carlo samples for each mu in mu_grid of size [G] from variational distribution q 
                  second_stage_num_particles: int = 5, # of Monte Carlo samples for ELBO in second stage full SVI optimization
                  # VI mu of L1 grid search hyperparams
                  L1_grid: torch.tensor = torch.linspace(100, 900, 400),
-                 fixed_sigma: float = 0.02,
+                 fixed_sigma: float = 0.01,
                  topK: int = 3, # Top K mus
-                 inner_steps: int = 100,  #Inner SVI steps at each grid point
+                 inner_steps: int = 80,  #Inner SVI steps at each grid point
                  inner_lr: float = 1e-2 #Inner SVI LR
                  ):
         self.fm = fm
@@ -384,7 +384,7 @@ class VIoptimized(Estimator):
         return topk_mu, elbo_per_run    
     
     def _profile_L1_mu_grid_cold_Zopt(self, y_ri, sig_f,
-                                    inner_steps=100,
+                                    inner_steps=80,
                                     inner_lr=1e-2,
                                     opt_particles=5,
                                     eval_particles=100):
@@ -534,7 +534,7 @@ class VIoptimized(Estimator):
         
  
         # For each L1 seed, run full SVI
-        for k in range(1):
+        for k in range(self.topK):
             pyro.clear_param_store()
             seed_from(k)
             optimizer = optim.Adam({"lr": self.svi_lr})
@@ -602,84 +602,50 @@ class VIoptimized(Estimator):
                 ZLi_med = self.ImZL_max * torch.tanh(ZLi_loc)
                 print("L1 avg", torch.mean(L1_med).item())
                 print("ZF_re avg", torch.mean(ZFr_med).item())
+        # return { #[M] each
+        #     "L1":    L1_med.float().cpu().numpy(), 
+        #     "ZF_re": ZFr_med.float().cpu().numpy(),
+        #     "ZF_im": ZFi_med.float().cpu().numpy(),
+        #     "ZL_re": ZLr_med.float().cpu().numpy(),
+        #     "ZL_im": ZLi_med.float().cpu().numpy(),
+        #     }
+
+                # Store medians for this seed k, per run m
+                L1_med_all[:, k] = L1_med
+                ZFr_med_all[:, k] = ZFr_med
+                ZFi_med_all[:, k] = ZFi_med
+                ZLr_med_all[:, k] = ZLr_med 
+                ZLi_med_all[:, k] = ZLi_med
+
+                # Compute per-run ELBO for this trained seed k
+                elbo_vec = self._per_run_elbo_once(
+                    self.guide,
+                    y_ri,
+                    sig_f,
+                    num_particles=100
+                )   # [M]
+
+                elbo_mk[:, k] = elbo_vec
+
+
+        # elbo_mk: [M,K] — larger is better
+        i_best = torch.argmax(elbo_mk, dim=1)  # [M], best seed index per observation
+        #print("i_best", i_best)
+        arM = torch.arange(M, device=device)
+
+        L1_best  = L1_med_all[arM, i_best]
+        ZFr_best = ZFr_med_all[arM, i_best]
+        ZFi_best = ZFi_med_all[arM, i_best]
+        ZLr_best = ZLr_med_all[arM, i_best]
+        ZLi_best = ZLi_med_all[arM, i_best]
+
+
         return { #[M] each
-            "L1":    L1_med.float().cpu().numpy(), 
-            "ZF_re": ZFr_med.float().cpu().numpy(),
-            "ZF_im": ZFi_med.float().cpu().numpy(),
-            "ZL_re": ZLr_med.float().cpu().numpy(),
-            "ZL_im": ZLi_med.float().cpu().numpy(),
-            }
-
-    #             # Store medians for this seed k, per run m
-    #             L1_med_all[:, k] = L1_med
-    #             ZFr_med_all[:, k] = ZFr_med
-    #             ZFi_med_all[:, k] = ZFi_med
-    #             ZLr_med_all[:, k] = ZLr_med 
-    #             ZLi_med_all[:, k] = ZLi_med
-
-    #             # Compute per-run ELBO for this trained seed k
-    #             elbo_vec = self._per_run_elbo_once(
-    #                 self.guide,
-    #                 y_ri,
-    #                 sig_f,
-    #                 num_particles=100
-    #             )   # [M]
-
-    #             elbo_mk[:, k] = elbo_vec
-
-
-    #     # Build complex ZF, ZL grids [M,K]
-    #     ZF_all = ZFr_med_all + 1j * ZFi_med_all        # [M,K]
-    #     ZL_all = ZLr_med_all + 1j * ZLi_med_all        # [M,K]
-
-    #     M, K = L1_med_all.shape
-    #     F = obs_tf.shape[1]
-    #     dev = obs_tf.device
-
-    #     # Flatten (M,K) -> (M*K,) for forward model
-    #     L1_flat = L1_med_all.reshape(-1)               # [M*K]
-    #     ZF_flat = ZF_all.reshape(-1)                   # [M*K]
-    #     ZL_flat = ZL_all.reshape(-1)                   # [M*K]
-
-    #     # Compute H for all (m,k) at once: [M*K,F]
-    #     H_flat = self.fm.compute_H_complex(L1_flat, ZF_flat, ZL_flat)  # [M*K, F]
-
-    #     # Reshape back to [M,K,F]
-    #     H_mkf = H_flat.view(M, K, F)                   # [M,K,F]
-
-    #     # Broadcast obs and noise var: [M,1,F]
-    #     obs = obs_tf.to(dev).unsqueeze(1)              # [M,1,F]
-    #     var = noise_var_f.to(dev).unsqueeze(1)         # [M,1,F]
-
-    #     # NLL_{m,k} = sum_f |y_{m,f} - H_{m,k,f}|^2 / var_{m,f}
-    #     diff    = obs - H_mkf                          # [M,K,F]
-    #     nll_mk  = ((diff.abs() ** 2) / var).sum(-1)    # [M,K]
-
-    #     #i_best = torch.argmin(nll_mk, dim=1)   # [M]
-    #    # print("i_best (NLL-based):", i_best)
-    #     print("L1 med all", L1_med_all)
-    #     #print("ZFR med all", ZFr_med_all)
-
-    #     # elbo_mk: [M,K] — larger is better
-    #     i_best = torch.argmax(elbo_mk, dim=1)  # [M], best seed index per observation
-    #     #print("i_best", i_best)
-    #     arM = torch.arange(M, device=device)
-
-    #     L1_best  = L1_med_all[arM, i_best]
-    #     ZFr_best = ZFr_med_all[arM, i_best]
-    #     ZFi_best = ZFi_med_all[arM, i_best]
-    #     ZLr_best = ZLr_med_all[arM, i_best]
-    #     ZLi_best = ZLi_med_all[arM, i_best]
-
-
-        
-
-    #     return { #[M] each
-    #         "L1":    L1_best.float().cpu().numpy(), 
-    #         "ZF_re": ZFr_best.float().cpu().numpy(),
-    #         "ZF_im": ZFi_best.float().cpu().numpy(),
-    #         "ZL_re": ZLr_best.float().cpu().numpy(),
-    #         "ZL_im": ZLi_best.float().cpu().numpy(),
-    #     }
+            "L1":    L1_best.float().cpu().numpy(), 
+            "ZF_re": ZFr_best.float().cpu().numpy(),
+            "ZF_im": ZFi_best.float().cpu().numpy(),
+            "ZL_re": ZLr_best.float().cpu().numpy(),
+            "ZL_im": ZLi_best.float().cpu().numpy(),
+        }
 
     

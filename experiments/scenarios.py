@@ -289,7 +289,7 @@ def main(cfg_path="configs/benchmark.yaml"):
     plt.grid(True)
     plt.legend(fontsize="x-small")
     plt.tight_layout()
-    plt.show()
+    plt.savefig("test1213")
 
 
 if __name__ == "__main__":
