@@ -9,7 +9,7 @@ class DatasetManager:
         self.device = device
 
     def _tag_from_cfg(self, seed, target, gen_cfg, fixed, freq_cfg, estimate):
-        # Taf from cfg params using hashlib
+        # Tag from cfg params using hashlib
         key = {
             "seed": int(seed),
             "target": str(target).upper(),
@@ -28,7 +28,7 @@ class DatasetManager:
     def _path(self, dataset_id, split, snr_db, target, tag):
         tgt = str(target).lower()
         return self.root / dataset_id / tgt / tag / f"{split}_snr{snr_db}.npz"
-
+    
     def _save_npz(self, path, **arrays):
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(path, **arrays)
@@ -117,34 +117,7 @@ class DatasetManager:
 
         H_true = fm.compute_H_complex(L1=L1_t, ZF=ZF_t, ZL=ZL_t)                 # [N,F] cfloat
 
-
-        # import matplotlib.pyplot as plt
-        # plt.title(f'ZF = {ZF_t[0]} at SNR = {snr_db}')
-        # plt.plot((desired_freq/1e6).cpu().numpy(),20*torch.log10(torch.abs(H_true[0])).cpu().numpy())
-        # plt.show()
-        # plt.title(f'ZF = {ZF_t[20]} at SNR = {snr_db}')
-        # plt.plot((desired_freq/1e6).cpu().numpy(),20*torch.log10(torch.abs(H_true[20])).cpu().numpy())
-        # plt.show()
-        # plt.title(f'ZF = {ZF_t[40]} at SNR = {snr_db}')
-        # plt.plot((desired_freq/1e6).cpu().numpy(),20*torch.log10(torch.abs(H_true[40])).cpu().numpy())
-        # plt.show()
-        # H_true2 = fm.compute_H_from_L1(L1=torch.tensor(200.0, device=self.device))
-
         snr_lin = 10.0 ** (snr_db / 10.0)
-
-        
-        #Option A: calibrate to a fixed "reference" TF at nominal params (fx)
-        # ref_L1 = torch.tensor(float(fx["L1"]), dtype=torch.float32, device=self.device)
-        # ref_ZF = torch.tensor(fx["ZF"],        dtype=torch.cfloat,  device=self.device)
-        # ref_ZL = torch.tensor(fx["ZL"],       dtype=torch.cfloat,  device=self.device)
-
-        # H_ref  = fm.compute_H_complex(L1=ref_L1.unsqueeze(0),
-        #                             ZF=ref_ZF.unsqueeze(0),
-        #                             ZL=ref_ZL.unsqueeze(0)).squeeze(0)  # [F]
-        # P_ref  = torch.mean(torch.abs(H_ref)**2).real.to(torch.float32)   # scalar power
-        # sigma2 = (P_ref / snr_lin)                                        # scalar σ²
-        # var_f  = sigma2 * torch.ones_like(H_true.real)                     # [N, F]
-        # std_f  = torch.sqrt(sigma2 / 2.0)                                  # scalar
 
 
         sigpow  = torch.mean(torch.abs(H_true)**2, dim=1, keepdim=True)          # [N,1]
@@ -169,49 +142,26 @@ class DatasetManager:
         return data
    
 
-    def build_or_load_pooled_dataset(
-        self, dataset_id, snr_list, N_per_snr,
+    def build_or_load_train_dataset(
+        self, dataset_id, snr_db, N_per_snr,
         gamma, Zc, L=1000.0, seed=5678,
         target=None, fixed=None, gen_cfg=None, freq_cfg=None,
-        force=False, desired_freq=None, estimate=None, split="train", include_snr_feature=True
+        force=False, desired_freq=None, estimate=None, split="train"
     ):
-        """Returns X_train = [N_train x len(snr_list), 2F+1]
-                   y_train = [N_train x len(snr_list), D]
+        """Returns X_train = [N_train, F, 2]
+                   y_train = [N_train, D]
                    where D is number of parameters we are estimating."""
-        X_list, y_list = [], []
 
-        #gen_cfg is grid range not true parameter range so that training data does not have a prior
-        for snr_db in snr_list:
-            data = self.build_or_load_dataset(
+        data = self.build_or_load_dataset(
                 dataset_id=dataset_id, split=split,
                 snr_db=snr_db, N=N_per_snr,
                 gamma=gamma, Zc=Zc, L=L, seed=seed + (777 if split=="train" else 0),
-                target=target, fixed=fixed, gen_cfg=gen_cfg, freq_cfg=freq_cfg,
+                target="ALL3DP", fixed=fixed, gen_cfg=gen_cfg, freq_cfg=freq_cfg,
                 force=force, desired_freq=desired_freq, estimate=estimate
-            )
-            ri = np.stack([data["h_obs_real"], data["h_obs_imag"]], axis=2)  # [N,F,2] numpy array
-            X = ri.reshape(ri.shape[0], -1).astype(np.float32) #[N, 2F]
-
-            if include_snr_feature:
-                # Per-sample SNR estimate (in dB) from observed power and provided noise_var
-                snr_col = np.full((X.shape[0], 1), float(snr_db), dtype=np.float32) #[N, 1]
-                X = np.concatenate([X, snr_col], axis=1) #[N, 2F]
-            # labels (1D target)
-            t = str(target).upper()
-            if t == "L1":
-                y = data["L1_true"]
-            elif t in ("ZF", "ZL"):
-                if estimate == "real":
-                    y = data[f"{t}_true_re"]
-                elif estimate == "imag":
-                    y = data[f"{t}_true_im"]
-                else:
-                    raise NotImplementedError("Full complex target not returned here; use multi-output later.")
-            else:
-                raise ValueError(f"Unknown target: {target}")
-
-            X_list.append(X)
-            y_list.append(y)
-        X_train = np.concatenate(X_list, axis=0)
-        y_train = np.concatenate(y_list, axis=0)
+        )
+        X_train = np.stack([data["h_obs_real"], data["h_obs_imag"]], axis=2)  # [N,F,2] numpy array
+        print("X_train", X_train)
+        print("X_train shape", X_train.shape)
+        y_train = None
+    
         return X_train, y_train

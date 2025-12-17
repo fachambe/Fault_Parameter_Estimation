@@ -3,17 +3,14 @@
 class Estimator:
     """
     For single-parameter estimators:
-      - Returns np.ndarray of shape [N]
-        * dtype=float32 for real params (L1, ReZF, ImZF, ReZL, ImZL)
-        * dtype=complex64 for full complex param (ZF or ZL with estimate=None)
-
+      - Returns a single numpy array of shape [M]
     For multi-parameter estimators:
-      - Returns np.ndarray of shape [N, D] (float32 or complex64) in a fixed column order [L1, ZF, ZL]. 
+      - Returns dict of numpy arrays of shape [M] for each parameter 
     """
     def __init__(self):
         raise NotImplementedError
 
-    def fit(self, train_data):
+    def fit(self, X_train, y_train):
         return self  # Only for ML models
 
     def predict(self, obs_tf, noise_var):

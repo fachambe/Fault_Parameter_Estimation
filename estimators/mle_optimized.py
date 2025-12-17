@@ -4,7 +4,6 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
-
 import torch.nn.functional as F
 from .base import Estimator  # keep your existing Estimator base
 from .lfbgs import batched_lbfgs
@@ -64,10 +63,10 @@ class OptimizedMLE(Estimator):
                  use_lbfgs: bool = True,
                  lbfgs_steps: int = 40,
                  verbose: bool = True,
-                 # --- NEW: profiling/bracketing controls ---
+                 #L1 Profiling
                  profile_L1: bool = True,
                  L1_grid_points: int = 400,      # coarse scan resolution
-                 inner_steps: int = 6,          # steps for Z reopt at each L1
+                 inner_steps: int = 10,          # steps for Z reopt at each L1
                  inner_lr: float = 1e-2,         # LR for the short inner Z-optim
                  profile_topk: int = 3):
         self.fm = fm
@@ -93,8 +92,8 @@ class OptimizedMLE(Estimator):
         self.inner_steps = int(inner_steps)
         self.inner_lr = float(inner_lr)
         self.topk = int(profile_topk)
-    
 
+    
     def _u_to_theta(self, u):
         """
         Only works for u of shape [..., 5].
@@ -134,6 +133,7 @@ class OptimizedMLE(Estimator):
         """
         Midpoint init in u-space for ZF, ZL, returned as uZ = [u1..u4]
         """
+        #ReZF0 = 2000.0
         ReZF0 = 0.5*(self.ReZF_lo + self.ReZF_hi)
         ImZF0 = 0.0
         ReZL0 = 0.5*(self.ReZL_lo + self.ReZL_hi)
@@ -145,9 +145,260 @@ class OptimizedMLE(Estimator):
         return u_all[1:].detach().clone()  # u1..u4
 
 
-    def _profile_all(self, y_f, var_f):
+    def _profile_all_cold(self, y_f, var_f):
         """
-        Vectorized profile:
+        Vectorized profile with COLD restarts over Z at each L1 grid point.
+        y_f,var_f: [M,F]
+        Returns:
+        L1_top: [M,topk]
+        uZ_top: [M,topk,4]  (uZ snapshot at chosen L1)
+        nll_top:[M,topk]    (not returned but easy to add)
+        """
+        M, F = y_f.shape
+        dev = self.device
+        G = self.L1_grid_points
+
+        L1_grid = torch.linspace(100, 900, G, device=dev, dtype=torch.float32)
+
+        # Storage for NLL and Z snapshots
+        nll_track = torch.empty(M, G, device=dev, dtype=torch.float32)   # [M,G]
+        uZ_snap   = torch.empty(M, G, 4, device=dev, dtype=torch.float32)  # [M,G,4]
+
+        for gi in range(G):
+            # Fix L1 to current grid value for all M runs
+            u0 = _range_to_sigmoid_x(L1_grid[gi], self.L1_lo, self.L1_hi).expand(M, 1)  # [M,1]
+
+            # --- COLD restart for Z at this grid point ---
+            uZ = torch.nn.Parameter(self._uZ_init_mid(dev).repeat(M, 1))  # [M,4]
+            opt = torch.optim.Adam([uZ], lr=self.inner_lr)
+
+            # Optimize ZF,ZL only (L1 fixed to grid value)
+            for t in range(20):
+                opt.zero_grad()
+                U = torch.cat([u0, uZ], dim=1)        # [M,5]
+                L1, ZF, ZL = self._u_to_theta(U)      # [M] each
+                H = self.fm.compute_H_complex(L1, ZF, ZL)  # [M,F]
+                diff = y_f - H
+                nll = ((diff.abs() ** 2) / var_f).sum(dim=1)  # [M]
+                loss = nll.mean()
+                loss.backward()
+                opt.step()
+
+            # Record profiled NLL and Z snapshot for this L1 grid point
+            with torch.no_grad():
+                U = torch.cat([u0, uZ], dim=1)
+                L1, ZF, ZL = self._u_to_theta(U)
+                
+                H = self.fm.compute_H_complex(L1, ZF, ZL)
+                diff = y_f - H
+                nll_track[:, gi] = ((diff.abs() ** 2) / var_f).sum(dim=1)  # [M]
+                uZ_snap[:, gi, :] = uZ.detach()                            # [M,4]
+
+        # Select top-K grid points per run [M,G] -> [M,K]
+        _, top_idx = torch.topk(-nll_track, k=self.topk, dim=1)  # min NLL
+        L1_top = L1_grid[top_idx]                                # [M,K]
+
+        # Debug counts (adjust true_L1/wrong_L1 per scenario)
+        true_L1  = 250.0
+        wrong_L1 = 750.0
+        tol = 5.0
+        col0 = L1_top[:, 0]
+
+        first_at_wrong = torch.isclose(col0,
+                                    torch.tensor(wrong_L1, device=L1_top.device),
+                                    atol=tol).sum().item()
+        first_at_true = torch.isclose(col0,
+                                    torch.tensor(true_L1, device=L1_top.device),
+                                    atol=tol).sum().item()
+
+        print(f"First-column seeds near {wrong_L1} (wrong):  {first_at_wrong}")
+        print(f"First-column seeds near {true_L1} (correct): {first_at_true}")
+        print(f"First-column seeds at neither: {col0.numel() - first_at_wrong - first_at_true}")
+
+        # Gather uZ for the chosen top-K indices: [M,K,4]
+        arM = torch.arange(M, device=dev)
+        uZ_top = uZ_snap[arM[:, None], top_idx, :]
+
+        return L1_top, uZ_top
+
+
+    def _profile_Zfixed(self, y_f, var_f):
+        """
+        Vectorized L1 profile with ZF, ZL held fixed at the midpoint
+        of their parameter ranges (no inner optimization).
+
+        Args
+        ----
+        y_f:   [M,F] complex tensor (observations)
+        var_f: [M,F] float tensor (noise variances)
+
+        Returns
+        -------
+        L1_top: [M, topk]      top-K L1 seeds per run
+        uZ_top: [M, topk, 4]   corresponding (fixed) uZ snapshot per seed
+        """
+        M, F = y_f.shape
+        dev = self.device
+        G = self.L1_grid_points
+
+        # L1 grid as before
+        L1_grid = torch.linspace(100, 900, G, device=dev, dtype=torch.float32)
+
+        # Fixed uZ at midpoint of parameter range, shared across all M and all gi
+        uZ_fixed = self._uZ_init_mid(dev).unsqueeze(0).repeat(M, 1)  # [M,4]
+        
+        # Storage for NLL per run per grid point
+        nll_track = torch.empty(M, G, device=dev, dtype=torch.float32)  # [M,G]
+
+        with torch.no_grad():
+            for gi in range(G):
+                # Set L1 to current grid value, same for all M runs
+                u0 = _range_to_sigmoid_x(L1_grid[gi], self.L1_lo, self.L1_hi).expand(M, 1)  # [M,1]
+
+                # Combine u0 (L1) with fixed uZ
+                U = torch.cat([u0, uZ_fixed], dim=1)  # [M,5]
+                L1, ZF, ZL = self._u_to_theta(U)      # [M] each
+
+                H = self.fm.compute_H_complex(L1, ZF, ZL)  # [M,F]
+                diff = y_f - H
+                nll_track[:, gi] = ((diff.abs() ** 2) / var_f).sum(dim=1)  # [M]
+
+        # Select top-K grid points per run [M,G] -> [M,K]
+        _, top_idx = torch.topk(-nll_track, k=self.topk, dim=1)  # minimize NLL
+
+        L1_top = L1_grid[top_idx]  # [M,K]
+
+        true_L1 = 250.0
+        another_L1 = 500.0
+        wrong_L1 = 750.0
+        tol = 5.0  
+        col0 = L1_top[:, 0]  # [N]
+
+        first_at_750 = torch.isclose(
+            col0,
+            torch.tensor(wrong_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
+        
+        first_at_500 = torch.isclose(
+            col0,
+            torch.tensor(another_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
+
+        first_at_250 = torch.isclose(
+            col0,
+            torch.tensor(true_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
+
+        print(f"First-column seeds near 750: {first_at_750}")
+        print(f"First-column seeds near 500: {first_at_500}")
+        print(f"First-column seeds near 250: {first_at_250}")
+        
+        # uZ is fixed, so for all top-K seeds it's the same uZ_fixed
+        # shape [M,K,4]
+        uZ_top = uZ_fixed.unsqueeze(1).expand(M, self.topk, 4)
+
+        return L1_top, uZ_top
+
+    def _profile_cold(self, y_f, var_f):
+        """
+        Profile L1 with cold restarts between each grid point.
+          y_f,var_f: [M,F]
+        Returns:
+          L1_top: [M,topk]
+          uZ_top: [M,topk,4]  (uZ snapshot at chosen L1)
+          nll_top:[M,topk]
+        """
+        M,F = y_f.shape
+        dev = self.device
+        G = self.L1_grid_points
+
+        L1_grid = torch.linspace(100, 900, G, device=dev, dtype=torch.float32)
+        nll_track = torch.empty(M, G, device=dev, dtype=torch.float32) #[M, G] NLL per run per grid
+        uZ_snap = torch.empty(M, G, 4, device=dev, dtype=torch.float32) #[M, G, 4] best uZ per run per grid
+        for gi in range(G):
+            u0 = _range_to_sigmoid_x(L1_grid[gi], self.L1_lo, self.L1_hi).expand(M, 1)  # [M,1]
+            # cold restart so re-init uZ and optimizer for every grid point
+            uZ = torch.nn.Parameter(self._uZ_init_mid(dev).repeat(M, 1))  # [M,4]
+            opt = torch.optim.Adam([uZ], lr=self.inner_lr)
+            #Adam at each grid point. u[0] (L1) always set to gridvalue. 
+            for t in range(100):
+                opt.zero_grad()
+                U = torch.cat([u0, uZ], dim=1)  # Concatenate [M, 1] and [M,4] to form [M,5]
+                L1, ZF, ZL = self._u_to_theta(U) # [M] each
+                H = self.fm.compute_H_complex(L1, ZF, ZL) #[M, F]
+                diff = y_f - H
+                nll = ((diff.abs()**2) / var_f).sum(dim=1) #[M]
+                # Key idea: If each entry in nll[m] depends ONLY on U[m,;] then summing doesn't couple anything because only
+                #the nll[m]th term has a gradient with respect to U[m,;] the rest are constants
+                loss = nll.mean()   
+                loss.backward()
+                opt.step()
+                # if t % 10 == 0:
+                #     print(f"[Step={t}] "
+                # f"ZF is ={torch.mean(ZF):.3f} "
+                # f"ZL is = {torch.mean(ZL):.3f}")
+
+            if gi % 5 == 0:
+                U = torch.cat([u0, uZ], dim=1)
+                L1, ZF, ZL = self._u_to_theta(U) #[M]
+                print(f"[g={gi}] L1={L1_grid[gi]:.2f}  "
+                f"ZF after optimization is ={torch.mean(ZF):.3f} "
+                f"ZL after optimization is = {torch.mean(ZL):.3f}")
+
+            # Record profiled NLL and snapshot after this grid point
+            with torch.no_grad():
+                U = torch.cat([u0, uZ], dim=1)
+                L1, ZF, ZL = self._u_to_theta(U) #[M]
+                H = self.fm.compute_H_complex(L1, ZF, ZL)     # [M, F]
+                diff = y_f - H 
+                # At grid point gi, store the per-run NLL and best uZ for all M Monte Carlo runs in that column
+                nll_track[:, gi] = ((diff.abs()**2) / var_f).sum(dim=1)  
+                uZ_snap[:, gi, :] = uZ.detach()
+        # Select top-K grid points per run [M, G] -> [M, K]
+        _, top_idx = torch.topk(-nll_track, k=self.topk, dim=1) #max of the negative is same as min of positive
+        L1_top  = L1_grid[top_idx]   # [N, K]
+        
+        true_L1 = 250.0
+        another_L1 = 500.0
+        wrong_L1 = 750.0
+        tol = 5.0  
+        col0 = L1_top[:, 0]  # [N]
+
+        first_at_750 = torch.isclose(
+            col0,
+            torch.tensor(wrong_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
+        
+        first_at_500 = torch.isclose(
+            col0,
+            torch.tensor(another_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
+
+        first_at_250 = torch.isclose(
+            col0,
+            torch.tensor(true_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
+
+        print(f"First-column seeds near 750: {first_at_750}")
+        print(f"First-column seeds near 500: {first_at_500}")
+        print(f"First-column seeds near 250: {first_at_250}")
+        
+        arM = torch.arange(M, device=dev)
+        uZ_top  = uZ_snap[arM[:, None], top_idx, :]  # [M, K, 4]
+
+        return L1_top, uZ_top
+
+
+
+    def _profile_warm(self, y_f, var_f):
+        """
+        Profile L1 with warm restarts between each grid point.
           y_f,var_f: [M,F]
         Returns:
           L1_top: [M,topk]
@@ -165,11 +416,15 @@ class OptimizedMLE(Estimator):
         opt = torch.optim.Adam([uZ], lr=self.inner_lr)
         nll_track = torch.empty(M, G, device=dev, dtype=torch.float32) #[M, G] NLL per run per grid
         uZ_snap = torch.empty(M, G, 4, device=dev, dtype=torch.float32) #[M, G, 4] best uZ per run per grid
-
-
+        
         for gi in range(G):
             u0 = _range_to_sigmoid_x(L1_grid[gi], self.L1_lo, self.L1_hi).expand(M, 1)  # [M,1]
-
+            if gi % 1 == 0:
+                U = torch.cat([u0, uZ], dim=1)  # Concatenate [M, 1] and [M,4] to form [M,5]
+                L1, ZF, ZL = self._u_to_theta(U) # [M] each
+                # print(f"[g={gi}] L1={L1_grid[gi]:.2f}  "
+                #   f"ZF before optimization is ={torch.mean(ZF):.3f} "
+                #   f"ZL before optimization is = {torch.mean(ZL):.3f}")
             #Adam at each grid point. u[0] (L1) always set to gridvalue. 
             for t in range(self.inner_steps):
                 opt.zero_grad()
@@ -183,6 +438,12 @@ class OptimizedMLE(Estimator):
                 loss = nll.mean()   
                 loss.backward()
                 opt.step()
+            if gi % 10 == 0:
+                U = torch.cat([u0, uZ], dim=1)
+                L1, ZF, ZL = self._u_to_theta(U) #[M]
+                print(f"[g={gi}] L1={L1_grid[gi]:.2f}  "
+                  f"ZF after optimization is ={torch.mean(ZF):.3f} "
+                  f"ZL after optimization is = {torch.mean(ZL):.3f}")
 
             # Record profiled NLL and snapshot after this grid point
             with torch.no_grad():
@@ -197,7 +458,8 @@ class OptimizedMLE(Estimator):
         _, top_idx = torch.topk(-nll_track, k=self.topk, dim=1) #max of the negative is same as min of positive
         L1_top  = L1_grid[top_idx]   # [N, K]
         
-        true_L1  = 250.0
+        true_L1 = 250.0
+        another_L1 = 500.0
         wrong_L1 = 750.0
         tol = 5.0  
         col0 = L1_top[:, 0]  # [N]
@@ -207,6 +469,12 @@ class OptimizedMLE(Estimator):
             torch.tensor(wrong_L1, device=L1_top.device),
             atol=tol
         ).sum().item()
+        
+        first_at_500 = torch.isclose(
+            col0,
+            torch.tensor(another_L1, device=L1_top.device),
+            atol=tol
+        ).sum().item()
 
         first_at_250 = torch.isclose(
             col0,
@@ -214,10 +482,9 @@ class OptimizedMLE(Estimator):
             atol=tol
         ).sum().item()
 
-        print(f"First-column seeds near 750 (wrong): {first_at_750}")
-        print(f"First-column seeds near 250 (correct): {first_at_250}")
-        print(f"First-column seeds at neither: {col0.numel() - first_at_750 - first_at_250}")
-
+        print(f"First-column seeds near 750: {first_at_750}")
+        print(f"First-column seeds near 500: {first_at_500}")
+        print(f"First-column seeds near 250: {first_at_250}")
         
         arM = torch.arange(M, device=dev)
         uZ_top  = uZ_snap[arM[:, None], top_idx, :]  # [M, K, 4]
@@ -229,7 +496,7 @@ class OptimizedMLE(Estimator):
     def predict(self, obs_tf, noise_var_f):
         """
         Jointly estimate parameters for M runs of N observations.
-        Here M = 1000, N = 1
+        Here M = 1000, N = 1. Will use M instead of M*N for simplicity. 
         Args
         ----
         obs_tf:      [M*N,F] complex tensor
@@ -250,7 +517,10 @@ class OptimizedMLE(Estimator):
 
         print("Running L1 Profile...")
         # 1) L1 Profile all M in parallel
-        L1_top, uZ_top = self._profile_all(obs_tf, noise_var_f) # [M,K], [M,K,4]
+        L1_top, uZ_top = self._profile_cold(obs_tf, noise_var_f)
+        #L1_top, uZ_top = self._profile_warm(obs_tf, noise_var_f) # [M,K], [M,K,4]
+        #L1_top, uZ_top = self._profile_Zfixed(obs_tf, noise_var_f)
+        
         print("Building Candidate Bank...")
         # 2) Build candidate bank U=[M,K,5]
         u0 = _range_to_sigmoid_x(L1_top, self.L1_lo, self.L1_hi).unsqueeze(-1) #[M,K,1]
@@ -289,14 +559,15 @@ class OptimizedMLE(Estimator):
             diff = obs_tf.unsqueeze(1) - H                   # [M,1,F] - [M,K,F]
             nv   = noise_var_f.unsqueeze(1)                  # [M,F] -> [M,1,F]
             final_nll = ((diff.abs() ** 2) / nv).sum(-1)     # [M,F,K] -> [M,K]
-
             # argmin across K, then gather best U row for each n
             i_best = torch.argmin(final_nll, dim=1)       #[M] containing indices of best k
             arM = torch.arange(M, device=U.device)
             U_best = U_refined[arM, i_best, :]               # [M,5]
 
         # 6) Map best U back to theta and return
+        
         L1_best, ZF_best, ZL_best = self._u_to_theta(U_best) # each [M]
+        
         out = {
             "L1":    L1_best.float().cpu().numpy(),
             "ZF_re": ZF_best.real.float().cpu().numpy(),

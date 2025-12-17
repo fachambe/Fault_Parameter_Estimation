@@ -79,13 +79,15 @@ def param_labels(target, estimate):
 
     return f"{t}", f"{t}"
 
+
+
 def main(cfg_path="configs/benchmark.yaml"):
 
     start_time = time.perf_counter()
     torch.set_printoptions(precision=8, sci_mode=False)
     cfg = yaml.safe_load(open(cfg_path))
     device = torch.device(cfg.get("device", "cpu"))
-    print('device', device)
+    print('Current device', device)
     # --- Load full arrays from the .mat (assumed in /experiments) ---
     mat = sio.loadmat("experiments/cable_parameter.mat")
     gamma_full = torch.tensor(mat["gamma"].squeeze(), dtype=torch.cfloat, device=device)
@@ -114,9 +116,6 @@ def main(cfg_path="configs/benchmark.yaml"):
     estimate = cfg["estimate"]
     text_param, latex_param = param_labels(target, estimate)
 
-    print("Text_param", text_param)
-    print("Latex param", latex_param)
-
     #Parameters
     snrs = cfg["snr_dbs"]
     N_train = int(cfg["train_per_snr"])
@@ -139,6 +138,7 @@ def main(cfg_path="configs/benchmark.yaml"):
         lbfgs_lr = 1.0,
         verbose=True
     )
+
     est2 = OptimizedMLE(
         fm=fm,
         likelihood=ComplexGaussianLik(),
@@ -146,8 +146,7 @@ def main(cfg_path="configs/benchmark.yaml"):
         device=device
     )
 
-    mu_grid = torch.linspace(float(cfg["vi_elbo1d"]["mu_grid"]["min"]), float(cfg["vi_elbo1d"]["mu_grid"]["max"]), int(cfg["vi_elbo1d"]["mu_grid"]["num"]),
-                             device=device, dtype=torch.float32)
+
     est3 = VI(
         fm = fm,
         likelihood=ComplexGaussianLik(),
@@ -183,22 +182,19 @@ def main(cfg_path="configs/benchmark.yaml"):
         K = 100
     )
 
-
   
 
     rmse_curves = {
         "mle_optimized": {k: [] for k in ["L1", "ZF", "ZL"]},
         "elbo_optimized": {k: [] for k in ["L1", "ZF", "ZL"]},
     }
-    #rmse_curves = {k: [] for k in ["L1","ZF","ZL"]} #dict of RMSE values for each parameter
-#     rmse_curves = {
-#     "grid": {k: [] for k in ["L1", "ZF", "ZL"]},
-#     "elbo": {k: [] for k in ["L1", "ZF", "ZL"]},
-# }
     
     
     crlb_curves = {k: [] for k in ["L1","ZF","ZL"]}
     for snr_db in snrs:
+        # train = dm.build_or_load_train_dataset(cfg["dataset_id"], snr_db, N_train, gamma_list, Zc_list, seed = seed, 
+        #                                        target=target, fixed=fixed, gen_cfg=cfg["true_range"], freq_cfg=cfg["freq"], 
+        #                                        force=cfg["force"], desired_freq = pul_freq[idx], estimate=estimate, split="train")
         test = dm.build_or_load_dataset(cfg["dataset_id"], snr_db, N_test, gamma_list, Zc_list, seed = seed, 
                                      target=target, fixed=fixed, gen_cfg=cfg["true_range"], freq_cfg=cfg["freq"], 
                                      force=cfg["force"], desired_freq=pul_freq[idx], estimate=estimate, split="test")
@@ -211,19 +207,11 @@ def main(cfg_path="configs/benchmark.yaml"):
         rmse_optimizedmle = rmse_joint(preds_optimizedmle, test)
         print("RMSE from MLE Optimized", rmse_optimizedmle)
         
+        
         preds_optimizedelbo = est4.predict(h_obs, var, snr_db)
         rmse_optimizedelbo = rmse_joint(preds_optimizedelbo, test)
         print("RMSE from ELBO Optimized", rmse_optimizedelbo)
-
-        # Joint MLE 
-        # est2.debug_plot_L1_nll(h_obs, var, example_idx=0, num_L1=800)
-        # preds_elbo = est6.predict(h_obs, var)
-        # rmse_elbo = rmse_joint(preds_elbo, test)["L1"]
-        # print("RMSE from 1D ELBO    ", rmse_elbo)
         
-        # preds_grid = est5.predict(h_obs, var)
-        # rmse_grid  = rmse_joint(preds_grid, test)["L1"]
-        # print("RMSE from grid       ", rmse_grid)
         
 
         du_aug = complex_partials_fullbatch(fm, test, device)   # [N, F, 5] complex
@@ -269,6 +257,7 @@ def main(cfg_path="configs/benchmark.yaml"):
             rmse_curves["elbo_optimized"][k].append(val2)
         
         
+    
     end_time = time.perf_counter()
     elapsed_time = end_time - start_time
     print(f"Program took {elapsed_time:.4f} seconds to run.")
@@ -296,7 +285,7 @@ def main(cfg_path="configs/benchmark.yaml"):
     plt.xlabel("SNR (dB)")
     plt.yscale("log")
     plt.ylabel("RMSE and sqrt(CRLB)")
-    plt.title(fr"Estimator RMSE vs $\sqrt{{\mathrm{{CRLB}}}}$ across SNR for L1")
+    plt.title(fr"Estimator RMSE vs $\sqrt{{\mathrm{{CRLB}}}}$ across SNR for (L1, ZF, ZL)")
     plt.grid(True)
     plt.legend(fontsize="x-small")
     plt.tight_layout()

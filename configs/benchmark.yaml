@@ -2,10 +2,10 @@
 device: "cuda"
 dataset_id: "fixed_v1_2-10MHz_F500"   # include range + F to avoid mixups
 seed: 5692
-force: False #Force to regenerate dataset
+force: True #Force to regenerate dataset
 plot_loglikelihood: False #Plot log-likelihood with respect to parameter of interest at each SNR
 
-snr_dbs: [40]
+snr_dbs: [0]
 
 test_per_snr: 1000
 train_per_snr: 1000
@@ -21,10 +21,11 @@ target: "ALL3SP" #L1, ZF, ZL, ALL3sameparams (ALL3SP), ALL3diffparams (ALL3DP)
 estimate: None #"real", "imag", or None. Only applies to 1D case. 
 
 fixed: 
-  L1: 250.0
+  L1: 500.0
   ZF: {re: 1000.0, im: 50.0}
   ZL: {re: 100.0,  im: -5.0}
 
+#Parameter Ranges
 true_range:
   L1: {min: 1.0, max: 1000.0}             
   ZF:

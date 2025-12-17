@@ -206,7 +206,5 @@ def batched_lbfgs(
         # 4) move iterate
         x, f, g = x_new.detach().requires_grad_(True), f_new, g_new
 
-        # (optional stopping criteria per block could go here)
-
     U_final = x.view(N, R, d)
     return U_final
