@@ -14,20 +14,15 @@ from sklearn.preprocessing import PolynomialFeatures
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.svm import SVR
-from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import GridSearchCV
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import validation_curve
-from sklearn import linear_model
 
 class MLRegressor(Estimator):
 
     def __init__(self,
                  fm,
                  likelihood,
-                 estimator_type, # "SVR", "GBR", "RFR", or custom
+                 estimator_type, # "SVR", "GBR", "RFR", "HGBR"
                  L: float = 1000.0,
                  device="cuda",
                  model_kwargs=None):
@@ -48,46 +43,60 @@ class MLRegressor(Estimator):
         self.model = self.build_model(estimator_type, model_kwargs)
 
     def build_model(self, estimator_type, kwargs):
+        kwargs = kwargs or {}
         if estimator_type == "svr":
-            return SVR(**kwargs)
+            return MultiOutputRegressor(SVR(**kwargs))
         elif estimator_type == "gbr":
-            return GradientBoostingRegressor(**kwargs)
+            return MultiOutputRegressor(GradientBoostingRegressor(**kwargs))
         elif estimator_type == "rfr":
             return RandomForestRegressor(**kwargs)
+        elif estimator_type == "hgbr":
+            model = MultiOutputRegressor(
+    HistGradientBoostingRegressor(
+        max_depth=6,
+        learning_rate=0.05,
+        max_iter=600,
+        l2_regularization=1e-3
+    )
+)              
+            return model
         else:
             raise ValueError(f"Unknown estimator_type: {estimator_type}")
 
-    def fit(self, obs_tf_train, y_train):
+    def fit(self, X_train, y_train):
         """
-        Train the underlying ML model.
-
-        obs_tf_train: [N_train, F] complex tensor
-        y_train:      [N_train, D] numpy array (L1 or [L1,ZF,ZL...])
+        Train ML Regressor. Here all N_train observations come from different parameter triplets (L1, ZF, ZL)
+        X_train: [N_train, 2*F] numpy array
+        y_train: [N_train, D] numpy array 
         """
-        X = obs_tf_train
-        self.model.fit(X, y_train)
+        print("Fitting model...")
+        self.model.fit(X_train, y_train)
         return self
-    def predict(self, obs_tf, noise_var_f):
+    
+    def predict(self, obs_tf, noise_var):
         """
         Jointly estimate parameters for M runs of N observations.
-        Here M = 1000, N = 1. Will use M instead of M*N for simplicity. 
+        Here M = 1000, N = 1. Will use M_test instead of M*N for simplicity. 
         Args
         ----
-        obs_tf:      [M*N,F] complex tensor
-        noise_var_f: [M*N,F] float tensor
+        obs_tf:      [M_test,2*F] numpy array
+        noise_var_f: [M_test,2*F] numpy array
 
         Returns
         -------
         dict of numpy arrays:
             {
-              "L1":    [M],
-              "ZF_re": [M], "ZF_im": [M],
-              "ZL_re": [M], "ZL_im": [M]
+              "L1":    [M_test],
+              "ZF_re": [M_test], "ZF_im": [M_test],
+              "ZL_re": [M_test], "ZL_im": [M_test]
             }
         """
-        # 0) Convert complex obs_tf [M, F] to real
-        X = torch.view_as_real(obs_tf)  # [M, F, 2]
-        y_pred = self.model.predict(X)
-        
-
-        return self
+        print("Predicting model...")
+        y_pred = self.model.predict(obs_tf)  # [N,5]
+        return {
+            "L1": y_pred[:, 0],
+            "ZF_re": y_pred[:, 1],
+            "ZF_im": y_pred[:, 2],
+            "ZL_re": y_pred[:, 3],
+            "ZL_im": y_pred[:, 4],
+        }

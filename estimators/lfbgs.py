@@ -24,13 +24,13 @@ def nll_per_block(
     _, F = y.shape
 
     # theta for each (n,r)
-    L1, ZF, ZL = u_to_theta(U)     # each [N, R]
-    H = fm.compute_H_complex(L1, ZF, ZL)  # [N, R, F] complex (or will be reshaped inside fm)
+    L1, ZF, ZL = u_to_theta(U)                 # each [N, R]
+    H = fm.compute_H_complex(L1, ZF, ZL)       # [N, R, F] complex
 
     # residuals and variance-weighted squared mag
-    diff = y[:, None, :] - H                         # [N,R,F]
+    diff = y[:, None, :] - H                                 # [N,R,F]
     ll   = -((diff.abs() ** 2) / nv[:, None, :]).sum(dim=-1)  # [N,R]
-    nll  = -ll                                       # [N,R]
+    nll  = -ll                                                 # [N,R]
     return nll
 
 
@@ -47,13 +47,14 @@ class LBFGSState:
         self.M = M
         self.d = d
 
+
 # ---------------------------------------------------------------------
 # Two-loop recursion (batched over blocks)
 # ---------------------------------------------------------------------
 def two_loop(S: Tensor, Y: Tensor, rho: Tensor, size: Tensor, g: Tensor) -> Tensor:
     """
     S, Y: [B, M, d], rho: [B, M], size: [B], g: [B, d]
-    returns: p = -H^{-1} g  with L-BFGS approximation, shape [B, d]
+    returns: p = -H^{-1} g with L-BFGS approximation, shape [B, d]
     """
     B, M, d = S.shape
     q = g.clone()
@@ -91,6 +92,7 @@ def two_loop(S: Tensor, Y: Tensor, rho: Tensor, size: Tensor, g: Tensor) -> Tens
     p = -z
     return p
 
+
 # ---------------------------------------------------------------------
 # Per-block Armijo backtracking (batched)
 # ---------------------------------------------------------------------
@@ -108,6 +110,7 @@ def armijo_backtracking(
     alpha = torch.full((B,), float(alpha0), device=x.device)
     gTp = (g * p).sum(dim=-1)              # [B]
     descent = gTp < 0
+
     # start
     x_new = x + alpha.unsqueeze(-1) * p
     f_new, g_new = eval_fg(x_new)
@@ -117,12 +120,14 @@ def armijo_backtracking(
         done = armijo_ok & descent
         if done.all():
             break
+
         # shrink where not done
         alpha = torch.where(done, alpha, alpha * tau)
         x_new = x + alpha.unsqueeze(-1) * p
         f_new, g_new = eval_fg(x_new)
 
     return alpha, f_new, g_new, x_new
+
 
 # ---------------------------------------------------------------------
 # Batched, decoupled L-BFGS
@@ -151,19 +156,23 @@ def batched_lbfgs(
     # helper to eval per-block f and g (no coupling, no sum)
     def eval_fg(x_curr):
         x_curr = x_curr.detach().clone().requires_grad_(True)  # [B,d]
-        U = x_curr.view(N, R, d) #[N,R,5]
-        # build per-block nll [N,R]
+        U = x_curr.view(N, R, d)  # [N,R,5]
+
+        # per-block nll [N,R]
         L1, ZF, ZL = u_to_theta(U)                      # each [N,R]
         H = fm.compute_H_complex(L1, ZF, ZL)            # [N,R,F]
         diff = y[:, None, :] - H                        # [N,R,F]
         nll = ((diff.abs()**2) / nv[:, None, :]).sum(dim=-1)  # [N,R]
+
         loss_vec = nll.view(-1)                         # [B]
+
         # gradient per block
         grad = torch.autograd.grad(
             outputs=loss_vec, inputs=x_curr,
             grad_outputs=torch.ones_like(loss_vec),
             retain_graph=False, create_graph=False
         )[0]                                           # [B,d]
+
         return loss_vec.detach(), grad.detach()
 
     # initial f, g
@@ -175,13 +184,13 @@ def batched_lbfgs(
     for _ in range(iters):
         # 1) two-loop direction
         p = two_loop(state.S, state.Y, state.rho, state.size, g)  # [B,d]
+
         # ensure descent (fallback to -g if needed)
         gTp = (g * p).sum(dim=-1)
         bad = gTp >= 0
         if bad.any():
             p = torch.where(bad.unsqueeze(-1), -g, p)
-            # optional: reset history for bad blocks
-            # (omitted for brevity)
+            # optional: reset history for bad blocks (omitted)
 
         # 2) per-block line search
         alpha, f_new, g_new, x_new = armijo_backtracking(

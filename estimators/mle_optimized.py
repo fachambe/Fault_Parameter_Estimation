@@ -1,8 +1,6 @@
 import math
 import torch
 import numpy as np
-import time
-import matplotlib.pyplot as plt
 
 import torch.nn.functional as F
 from .base import Estimator  # keep your existing Estimator base
@@ -10,32 +8,32 @@ from .lfbgs import batched_lbfgs
 torch.set_float32_matmul_precision("high")
 #torch.set_printoptions(profile="full")   # show full tensors
 
-
-def _sigmoid_to_range(u: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
-    # Map R -> (lo,hi)
+def _sigmoid_to_range(u, lo, hi):
+    # Map u in R -> theta in (lo,hi) using sigmoid
     return lo + (hi - lo) * torch.sigmoid(u)
 
-def _range_to_sigmoid_x(x: torch.Tensor, lo: float, hi: float, eps: float = 1e-6) -> torch.Tensor:
-    # Inverse of _sigmoid_to_range (for seeding)
+def _range_to_sigmoid_x(x, lo, hi, eps: float = 1e-6):
+    # Inverse of _sigmoid_to_range for seeding
     z = ((x - lo) / (hi - lo)).clamp(eps, 1.0 - eps)  # avoid 0/1
     return torch.log(z) - torch.log1p(-z)  # logit
 
-def _tanh_to_range(u: torch.Tensor, max_abs: float) -> torch.Tensor:
-    # Map R -> (-max_abs, max_abs)
+def _tanh_to_range(u, max_abs):
+    # Map u in R -> theta in (-max_abs, max_abs) using tanh
     return max_abs * torch.tanh(u)
 
-def _range_to_tanh_x(x: torch.Tensor, max_abs: float, eps: float = 1e-6) -> torch.Tensor:
-    # Inverse of _tanh_to_range (for seeding)
+def _range_to_tanh_x(x, max_abs, eps: float = 1e-6):
+    # Inverse of _tanh_to_range for seeding
     r = (x / max_abs).clamp(-1.0 + eps, 1.0 - eps)
     return 0.5 * torch.log1p(r) - 0.5 * torch.log1p(-r)  # atanh
 
+
 class OptimizedMLE(Estimator):
     """
-    Joint continuous MLE for theta = [L1, ReZF, ImZF, ReZL, ImZL].
+    Joint continuous MLE with L1 Profile for theta = [L1, ReZF, ImZF, ReZL, ImZL].
 
     Parameterization:
       L1    in [0, L]           via sigmoid
-      ReZF  in [1, 2000]        via sigmoid
+      ReZF  in [1, 4000]        via sigmoid
       ImZF  in [-100, +100]     via tanh
       ReZL  in [1, 200]         via sigmoid
       ImZL  in [-100, +100]     via tanh
@@ -65,8 +63,8 @@ class OptimizedMLE(Estimator):
                  verbose: bool = True,
                  #L1 Profiling
                  profile_L1: bool = True,
-                 L1_grid_points: int = 400,      # coarse scan resolution
-                 inner_steps: int = 10,          # steps for Z reopt at each L1
+                 L1_grid_points: int = 400,      
+                 inner_steps: int = 100,          # steps for Z opt at each L1
                  inner_lr: float = 1e-2,         # LR for the short inner Z-optim
                  profile_topk: int = 3):
         self.fm = fm
@@ -324,7 +322,7 @@ class OptimizedMLE(Estimator):
             uZ = torch.nn.Parameter(self._uZ_init_mid(dev).repeat(M, 1))  # [M,4]
             opt = torch.optim.Adam([uZ], lr=self.inner_lr)
             #Adam at each grid point. u[0] (L1) always set to gridvalue. 
-            for t in range(100):
+            for t in range(self.inner_steps):
                 opt.zero_grad()
                 U = torch.cat([u0, uZ], dim=1)  # Concatenate [M, 1] and [M,4] to form [M,5]
                 L1, ZF, ZL = self._u_to_theta(U) # [M] each
@@ -341,7 +339,7 @@ class OptimizedMLE(Estimator):
                 # f"ZF is ={torch.mean(ZF):.3f} "
                 # f"ZL is = {torch.mean(ZL):.3f}")
 
-            if gi % 5 == 0:
+            if gi % 10 == 0:
                 U = torch.cat([u0, uZ], dim=1)
                 L1, ZF, ZL = self._u_to_theta(U) #[M]
                 print(f"[g={gi}] L1={L1_grid[gi]:.2f}  "
@@ -438,12 +436,12 @@ class OptimizedMLE(Estimator):
                 loss = nll.mean()   
                 loss.backward()
                 opt.step()
-            if gi % 10 == 0:
-                U = torch.cat([u0, uZ], dim=1)
-                L1, ZF, ZL = self._u_to_theta(U) #[M]
-                print(f"[g={gi}] L1={L1_grid[gi]:.2f}  "
-                  f"ZF after optimization is ={torch.mean(ZF):.3f} "
-                  f"ZL after optimization is = {torch.mean(ZL):.3f}")
+            # if gi % 10 == 0:
+            #     U = torch.cat([u0, uZ], dim=1)
+            #     L1, ZF, ZL = self._u_to_theta(U) #[M]
+            #     print(f"[g={gi}] L1={L1_grid[gi]:.2f}  "
+            #       f"ZF after optimization is ={torch.mean(ZF):.3f} "
+            #       f"ZL after optimization is = {torch.mean(ZL):.3f}")
 
             # Record profiled NLL and snapshot after this grid point
             with torch.no_grad():
@@ -518,11 +516,8 @@ class OptimizedMLE(Estimator):
         print("Running L1 Profile...")
         # 1) L1 Profile all M in parallel
         L1_top, uZ_top = self._profile_cold(obs_tf, noise_var_f)
-        #L1_top, uZ_top = self._profile_warm(obs_tf, noise_var_f) # [M,K], [M,K,4]
-        #L1_top, uZ_top = self._profile_Zfixed(obs_tf, noise_var_f)
-        
-        print("Building Candidate Bank...")
-        # 2) Build candidate bank U=[M,K,5]
+        print("Seeding...")
+        # 2) Seeding
         u0 = _range_to_sigmoid_x(L1_top, self.L1_lo, self.L1_hi).unsqueeze(-1) #[M,K,1]
         U = torch.cat([u0, uZ_top], dim=-1)   # [M,K,5]
         print("Running Adam in parallel...")
@@ -567,7 +562,6 @@ class OptimizedMLE(Estimator):
         # 6) Map best U back to theta and return
         
         L1_best, ZF_best, ZL_best = self._u_to_theta(U_best) # each [M]
-        
         out = {
             "L1":    L1_best.float().cpu().numpy(),
             "ZF_re": ZF_best.real.float().cpu().numpy(),

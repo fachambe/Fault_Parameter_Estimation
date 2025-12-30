@@ -10,34 +10,50 @@ import pyro.distributions as dist
 from estimators.base import Estimator  # your base
 torch.set_float32_matmul_precision("high")
 
-def _sigmoid_to_range(u: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+def _sigmoid_to_range(u, lo, hi):
+    # Map u in R -> theta in (lo,hi) using sigmoid
     return lo + (hi - lo) * torch.sigmoid(u)
 
-def _tanh_to_range(u: torch.Tensor, max_abs: float) -> torch.Tensor:
+def _range_to_sigmoid_x(x, lo, hi, eps: float = 1e-6):
+    # Inverse of _sigmoid_to_range for seeding
+    z = ((x - lo) / (hi - lo)).clamp(eps, 1.0 - eps)  # avoid 0/1
+    return torch.log(z) - torch.log1p(-z)  # logit
+
+def _tanh_to_range(u, max_abs):
+    # Map u in R -> theta in (-max_abs, max_abs) using tanh
     return max_abs * torch.tanh(u)
 
+def _range_to_tanh_x(x, max_abs, eps: float = 1e-6):
+    # Inverse of _tanh_to_range for seeding
+    r = (x / max_abs).clamp(-1.0 + eps, 1.0 - eps)
+    return 0.5 * torch.log1p(r) - 0.5 * torch.log1p(-r)  # atanh
 
 class VI(Estimator):
     """
-    Per-observation Variational Inference:
-      theta_n = [L1_n, ReZF_n, ImZF_n, ReZL_n, ImZL_n] for each n in 1..N.
+    Stochastic Variational Inference
 
     Model/Guide:
       - Unconstrained latents (R) for each component: L1_u, ReZF_u, ImZF_u, ReZL_u, ImZL_u
       - Priors: Uniform over parameter range
-      - Transforms inside model to enforce SAME ranges as your MLE:
-          L1    in [L1_lo, L1_hi]      via sigmoid -> affine
-          ReZF  in [ReZF_lo, ReZF_hi]  via sigmoid -> affine
-          ImZF  in [-ImZF_max, +ImZF_max] via tanh -> scale
-          ReZL  in [ReZL_lo, ReZL_hi]  via sigmoid -> affine
-          ImZL  in [-ImZL_max, +ImZL_max] via tanh -> scale
-      - Likelihood:
-          For each (n,f), observe y_{n,f} (complex) as 2-D real Normal
-          with isotropic covariance sigma_{n,f}^2 I_2.
+    Parameterization:
+      L1    in [0, L]           via sigmoid
+      ReZF  in [1, 4000]        via sigmoid
+      ImZF  in [-100, +100]     via tanh
+      ReZL  in [1, 200]         via sigmoid
+      ImZL  in [-100, +100]     via tanh
 
-    Inputs:
-      obs_tf:      [N,F] complex64/complex32 tensor (on device)
-      noise_var_f: [N,F] float32 tensor (on device)
+    Args
+    ----
+    fm: ForwardModel                (provides compute_H_complex(L1, ZF, ZL))
+    likelihood:                     ComplexGaussianLik()
+    L: float                        line length (upper bound for L1)
+    device: torch.device
+    n_starts: int                   number of random restarts per observation
+    adam_steps: int
+    adam_lr: float
+    use_lbfgs: bool
+    lbfgs_steps: int
+    verbose: bool
     """
     def __init__(self,
                  fm,
@@ -120,7 +136,7 @@ class VI(Estimator):
             pyro.sample("L1", q_L1)
             # ZF_re in [ReZF_lo, ReZF_hi]
             ZFr_loc   = pyro.param("ZF_re_loc", torch.zeros(N, device=device))
-            ZFr_scale = pyro.param("ZF_re_scale", torch.full((N,), 0.5, device=device),
+            ZFr_scale = pyro.param("ZF_re_scale", torch.full((N,), 0.25, device=device),
                                 constraint=constraints.positive)
             q_ZFr = dist.TransformedDistribution(
                 dist.Normal(ZFr_loc, ZFr_scale),
@@ -130,7 +146,7 @@ class VI(Estimator):
 
             # ZF_im in [-ImZF_max, +ImZF_max]
             ZFi_loc   = pyro.param("ZF_im_loc",   torch.zeros(N, device=device))
-            ZFi_scale = pyro.param("ZF_im_scale", torch.full((N,), 0.5, device=device),
+            ZFi_scale = pyro.param("ZF_im_scale", torch.full((N,), 0.25, device=device),
                                 constraint=constraints.positive)
             q_ZFi = dist.TransformedDistribution(
                 dist.Normal(ZFi_loc, ZFi_scale),
@@ -140,7 +156,7 @@ class VI(Estimator):
 
             # ZL_re in [ReZL_lo, ReZL_hi]
             ZLr_loc   = pyro.param("ZL_re_loc",   torch.zeros(N, device=device))
-            ZLr_scale = pyro.param("ZL_re_scale", torch.full((N,), 0.5, device=device),
+            ZLr_scale = pyro.param("ZL_re_scale", torch.full((N,), 0.25, device=device),
                                 constraint=constraints.positive)
             q_ZLr = dist.TransformedDistribution(
                 dist.Normal(ZLr_loc, ZLr_scale),
@@ -150,7 +166,7 @@ class VI(Estimator):
 
             # ZL_im in [-ImZL_max, +ImZL_max]
             ZLi_loc   = pyro.param("ZL_im_loc",   torch.zeros(N, device=device))
-            ZLi_scale = pyro.param("ZL_im_scale", torch.full((N,), 0.5, device=device),
+            ZLi_scale = pyro.param("ZL_im_scale", torch.full((N,), 0.25, device=device),
                                 constraint=constraints.positive)
             q_ZLi = dist.TransformedDistribution(
                 dist.Normal(ZLi_loc, ZLi_scale),

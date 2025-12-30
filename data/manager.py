@@ -156,12 +156,19 @@ class DatasetManager:
                 dataset_id=dataset_id, split=split,
                 snr_db=snr_db, N=N_per_snr,
                 gamma=gamma, Zc=Zc, L=L, seed=seed + (777 if split=="train" else 0),
-                target="ALL3DP", fixed=fixed, gen_cfg=gen_cfg, freq_cfg=freq_cfg,
+                target=target, fixed=fixed, gen_cfg=gen_cfg, freq_cfg=freq_cfg,
                 force=force, desired_freq=desired_freq, estimate=estimate
         )
-        X_train = np.stack([data["h_obs_real"], data["h_obs_imag"]], axis=2)  # [N,F,2] numpy array
-        print("X_train", X_train)
-        print("X_train shape", X_train.shape)
-        y_train = None
+        
+        # [N,F,2]
+        X = np.stack(
+            [data["h_obs_real"], data["h_obs_imag"]],
+            axis=2
+        )
+
+        # flatten → [N,2F]
+        N, F, _ = X.shape
+        X_train = X.reshape(N, 2 * F)
+        y_train = np.stack([data["L1_true"], data["ZF_true_re"], data["ZF_true_im"], data["ZL_true_re"], data["ZL_true_im"]], axis=-1) #[N, 5] numpy aray
     
         return X_train, y_train

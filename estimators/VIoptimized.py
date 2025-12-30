@@ -17,54 +17,66 @@ from estimators.base import Estimator  # your base
 torch.set_float32_matmul_precision("high")
 #torch.set_printoptions(profile="full")   # show full tensors
 
-def _sigmoid_to_range(u: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+def _sigmoid_to_range(u, lo, hi):
+    # Map u in R -> theta in (lo,hi) using sigmoid
     return lo + (hi - lo) * torch.sigmoid(u)
 
-def _tanh_to_range(u: torch.Tensor, max_abs: float) -> torch.Tensor:
-    return max_abs * torch.tanh(u)
-
-def _range_to_sigmoid_x(x: torch.Tensor, lo: float, hi: float, eps: float = 1e-6) -> torch.Tensor:
-    # Inverse of _sigmoid_to_range (for seeding)
+def _range_to_sigmoid_x(x, lo, hi, eps: float = 1e-6):
+    # Inverse of _sigmoid_to_range for seeding
     z = ((x - lo) / (hi - lo)).clamp(eps, 1.0 - eps)  # avoid 0/1
     return torch.log(z) - torch.log1p(-z)  # logit
 
+def _tanh_to_range(u, max_abs):
+    # Map u in R -> theta in (-max_abs, max_abs) using tanh
+    return max_abs * torch.tanh(u)
+
+def _range_to_tanh_x(x, max_abs, eps: float = 1e-6):
+    # Inverse of _tanh_to_range for seeding
+    r = (x / max_abs).clamp(-1.0 + eps, 1.0 - eps)
+    return 0.5 * torch.log1p(r) - 0.5 * torch.log1p(-r)  # atanh
+
 class VIoptimized(Estimator):
     """
-    Per-observation Variational Inference:
-      theta_n = [L1_n, ReZF_n, ImZF_n, ReZL_n, ImZL_n] for each n in 1..N.
+    Stochastic Variational Inference with mu_L1 ELBO Profile
 
     Model/Guide:
       - Unconstrained latents (R) for each component: L1_u, ReZF_u, ImZF_u, ReZL_u, ImZL_u
       - Priors: Uniform over parameter range
-      - Transforms inside model to enforce SAME ranges as your MLE:
-          L1    in [L1_lo, L1_hi]      via sigmoid -> affine
-          ReZF  in [ReZF_lo, ReZF_hi]  via sigmoid -> affine
-          ImZF  in [-ImZF_max, +ImZF_max] via tanh -> scale
-          ReZL  in [ReZL_lo, ReZL_hi]  via sigmoid -> affine
-          ImZL  in [-ImZL_max, +ImZL_max] via tanh -> scale
-      - Likelihood:
-          For each (n,f), observe y_{n,f} (complex) as 2-D real Normal
-          with isotropic covariance sigma_{n,f}^2 I_2.
+    Parameterization:
+      L1    in [0, L]           via sigmoid
+      ReZF  in [1, 4000]        via sigmoid
+      ImZF  in [-100, +100]     via tanh
+      ReZL  in [1, 200]         via sigmoid
+      ImZL  in [-100, +100]     via tanh
 
-    Inputs:
-      obs_tf:      [N,F] complex64 tensor (on device)
-      noise_var_f: [N,F] float32 tensor (on device)
+    Args
+    ----
+    fm: ForwardModel                (provides compute_H_complex(L1, ZF, ZL))
+    likelihood:                     ComplexGaussianLik()
+    L: float                        line length (upper bound for L1)
+    device: torch.device
+    n_starts: int                   number of random restarts per observation
+    adam_steps: int
+    adam_lr: float
+    use_lbfgs: bool
+    lbfgs_steps: int
+    verbose: bool
     """
     def __init__(self,
                  fm,
                  likelihood,
                  L: float = 1000.0,
                  device="cuda",
-                 # VI hyperparams
+                 # VI parameters
                  svi_steps: int = 3000,
-                 svi_lr: float = 1e-2,
-                 first_stage_num_particles: int = 100, # of Monte Carlo samples for each mu in mu_grid of size [G] from variational distribution q 
+                 svi_lr: float = 1e-2, 
                  second_stage_num_particles: int = 5, # of Monte Carlo samples for ELBO in second stage full SVI optimization
-                 # VI mu of L1 grid search hyperparams
+                 # mu_L1 Profile grid search parameters
                  L1_grid: torch.tensor = torch.linspace(100, 900, 400),
-                 fixed_sigma: float = 0.01,
+                 first_stage_num_particles: int = 100, # of Monte Carlo samples for each mu in mu_grid of size [G] from variational distribution q
+                 fixed_sigma: float = 0.01, 
                  topK: int = 3, # Top K mus
-                 inner_steps: int = 80,  #Inner SVI steps at each grid point
+                 inner_steps: int = 100,  #Inner SVI steps at each grid point
                  inner_lr: float = 1e-2 #Inner SVI LR
                  ):
         self.fm = fm
@@ -88,34 +100,6 @@ class VIoptimized(Estimator):
         self.ImZF_max = 100.0
         self.ReZL_lo, self.ReZL_hi = 1.0, 200.0
         self.ImZL_max = 100.0
-
-        self.mle_profiler = OptimizedMLE(
-            fm=fm,
-            likelihood=likelihood,
-            L=L,
-            device=device,
-        )
-
-    def _profile_L1_with_mle(self, obs_tf, noise_var_f):
-        """
-        Use OptimizedMLE's NLL-based L1 profile to get top-K L1 seeds per run,
-        then convert them into μ-seeds in unconstrained space for SVI.
-
-        obs_tf:      [M,F] (complex)
-        noise_var_f: [M,F] (float)
-        Returns:
-          topk_mu: [M,K]  (μ-seeds in unconstrained space)
-          topk_L1: [M,K]  (same seeds in physical L1-space, for diagnostics)
-        """
-        y_f = obs_tf.to(self.device)          # [M,F] complex
-        var_f = noise_var_f.to(self.device)   # [M,F] float
-
-        # L1_top: [M,K], uZ_top: [M,K,4]
-        L1_top, _ = self.mle_profiler._profile_cold(y_f, var_f)
-
-        topk_mu = _range_to_sigmoid_x(L1_top, self.L1_lo, self.L1_hi)  # [M,K]
-
-        return topk_mu, L1_top
 
     def model(self, y_ri, sig_f):
     # y_ri: [M, F, 2], sig_f: [M, F]
@@ -151,7 +135,7 @@ class VIoptimized(Estimator):
             pyro.sample("y", dist.Normal(H_ri, sig_nf2).to_event(2), obs=y_ri) 
             #F and Re/Im are independent treat [F, 2] as event not batch shape
 
-    # GUIDE: Normal on R with Sigmoid/Tanh transforms to match parameter ranges
+    # GUIDE (Variational Distribution): Normal on R with Sigmoid/Tanh transforms to match parameter ranges
     def guide(self, y_ri, sig_f):
         M, F, _ = y_ri.shape
         device = self.device
@@ -279,6 +263,8 @@ class VIoptimized(Estimator):
         y_ri:  [M,F,2]
         mu_vec:[M]  (unconstrained mu for L1)
         uZ:    [M,4] unconstrained params for (ReZF, ImZF, ReZL, ImZL)
+
+        Guide with L1 fixed, Z as optimizable parameters
         """
         M, _, _ = y_ri.shape
         device = self.device
@@ -384,47 +370,51 @@ class VIoptimized(Estimator):
         return topk_mu, elbo_per_run    
     
     def _profile_L1_mu_grid_cold_Zopt(self, y_ri, sig_f,
-                                    inner_steps=80,
-                                    inner_lr=1e-2,
                                     opt_particles=5,
                                     eval_particles=100):
+        """
+        Scan μ_L1 over self.L1_grid (via mu_grid) with Z optimized (cold restarts),
+        and return:
+        topk_mu:      [M, K]
+        elbo_per_run: [G, M]
+        uZ_top:       [M, K, 4]   (optimized uZ for each chosen μ seed)
+        """
         pyro.clear_param_store()
         device = y_ri.device
         M, F, _ = y_ri.shape
         G = self.L1_grid.numel()
 
         elbo_per_run = torch.empty(G, M, device=device)
+        uZ_opt_grid = torch.empty(G, M, 4, device=device)
 
         # μ grid corresponding to L1_grid
         mu_grid = _range_to_sigmoid_x(self.L1_grid, self.L1_lo, self.L1_hi)  # [G]
 
-        # midpoint init for uZ (unconstrained) 
+        # midpoint init for uZ
         uZ0 = torch.zeros(M, 4, device=device)  # [M,4]
 
         for g, mu in enumerate(mu_grid):
             mu_vec = torch.full((M,), float(mu), device=device)
 
-            # ---- COLD restart Z for this grid point ----
+            # cold restarts
             uZ = torch.nn.Parameter(uZ0.clone())
-            opt = torch.optim.Adam([uZ], lr=inner_lr)
+            opt = torch.optim.Adam([uZ], lr=self.inner_lr)
 
             # inner Z optimization: maximize ELBO wrt uZ
-            for t in range(inner_steps):
+            for t in range(self.inner_steps):
                 opt.zero_grad()
-
                 guide_fn = lambda y, s: self.guide_L1_mu_Z_delta(y, s, mu_vec, uZ)
                 elbo_vec = self._per_run_elbo_once_grad(guide_fn, y_ri, sig_f, num_particles=opt_particles)  # [M]
-
                 loss = -elbo_vec.mean()  # maximize ELBO
                 loss.backward()
-                #if t & 10 == 0:
-                #    print(f"Step = {t} | Loss = {loss}")
                 opt.step()
-            #u1, u2, u3, u4 = uZ.unbind(dim=1)
-            #ZF_re = self.ReZF_lo + (self.ReZF_hi - self.ReZF_lo) * torch.sigmoid(u1)
-            #print("ZF_re after optimization", ZF_re)
-            # ---- evaluate ELBO at optimized Z (more particles, no grad) ----
+
+            
+            # evaluate ELBO at optimized Z (more particles)
             with torch.no_grad():
+
+                uZ_opt_grid[g].copy_(uZ.detach())
+
                 guide_fn = lambda y, s: self.guide_L1_mu_Z_delta(y, s, mu_vec, uZ)
                 elbo_per_run[g] = self._per_run_elbo_once(guide_fn, y_ri, sig_f, num_particles=eval_particles)
 
@@ -433,18 +423,22 @@ class VIoptimized(Estimator):
                 print(f"[g={g}] mu={float(mu):+.4f}  L1≈{float(L1_center):.2f}  "
                     f"ELBO={float(elbo_per_run[g].mean()):.3f}")
 
-        # Top-K μ per run (dim=0 is grid)
+        # Top-K μ per run
         _, topk_idx = torch.topk(elbo_per_run, k=self.topK, dim=0)
         topk_mu = mu_grid[topk_idx].transpose(0, 1).contiguous()  # [M,K]
 
-        return topk_mu, elbo_per_run
+        m_idx = torch.arange(M, device=device).unsqueeze(0).expand(self.topK, M)  # [K, M]
+        uZ_top_km4 = uZ_opt_grid[topk_idx, m_idx, :]  # [K, M, 4]
+        uZ_top = uZ_top_km4.permute(1, 0, 2).contiguous()  # [M, K, 4]
+
+        return topk_mu, elbo_per_run, uZ_top
 
 
     def predict(self, obs_tf, noise_var_f, snr):
         """
         Jointly estimate parameters for M runs of N observations with:
-        (1) 1-D ELBO grid search over μ (L1) with cold starts on Z,
-        (2) Full SVI with pyro starting from the best μ seeds.
+        (1) 1-D ELBO grid search over μ (L1) with cold restarts on Z,
+        (2) Full SVI starting from the best μ (L1) seeds.
 
         Returns posterior medians as the point estimate for each parameter.
         """
@@ -459,12 +453,10 @@ class VIoptimized(Estimator):
         # 1) 1-D ELBO grid over the variational mean (mu) of L1 (Z frozen)
         #topk_mu, _ = self._profile_L1_with_mle(obs_tf, noise_var_f)  # [M,K] each
         #topk_mu, elbo_per_run = self._profile_L1_mu_grid_2(y_ri, sig_f)  # [M,K]
-
-        topk_mu, elbo_per_run = self._profile_L1_mu_grid_cold_Zopt(y_ri, sig_f)  # [M,K]
+        topk_mu, elbo_per_run, uZ_top= self._profile_L1_mu_grid_cold_Zopt(y_ri, sig_f)  # [M,K]
 
         # For diagnostics: convert μ seeds to L1-space
         topk_L1 = self.L1_lo + (self.L1_hi - self.L1_lo) * torch.sigmoid(topk_mu)  # [M,K]
-        #print("topk_mu in L1 space", topk_L1)
 
         # --- diagnostics: count + list where first seed lands ---
         true_L1  = 250.0
@@ -492,7 +484,7 @@ class VIoptimized(Estimator):
         print("First-column seeds at 250:", first_at_250)
         
         
-        # --- 2) Run SVI inference for the top-K L1 seeds for all M runs ---
+        # 2) Run SVI inference for the top-K mu(L1) seeds for all M runs
         
         # Choose neutral Z seeds in unconstrained space: 0 -> mid-range after sigmoid/tanh
         zero = torch.zeros(M, device=device)
@@ -517,10 +509,19 @@ class VIoptimized(Estimator):
 
         def seed_from(k):
             set_param("L1_loc", topk_mu[:, k], fixed_sigma=self.fixed_sigma)
-            set_param("ZF_re_loc", zero, default_scale=0.25)
-            set_param("ZF_im_loc", zero, default_scale=0.25)
-            set_param("ZL_re_loc", zero, default_scale=0.25)
-            set_param("ZL_im_loc", zero, default_scale=0.25)
+            # pull the optimized uZ seeds for this k: [M,4]
+            uZk = uZ_top[:, k, :]  # [M,4]
+
+            set_param("ZF_re_loc", uZk[:, 0], default_scale=0.25)
+            set_param("ZF_im_loc", uZk[:, 1], default_scale=0.25)
+            set_param("ZL_re_loc", uZk[:, 2], default_scale=0.25)
+            set_param("ZL_im_loc", uZk[:, 3], default_scale=0.25)
+        # def seed_from(k):
+        #     set_param("L1_loc", topk_mu[:, k], fixed_sigma=self.fixed_sigma)
+        #     set_param("ZF_re_loc", zero, default_scale=0.25)
+        #     set_param("ZF_im_loc", zero, default_scale=0.25)
+        #     set_param("ZL_re_loc", zero, default_scale=0.25)
+        #     set_param("ZL_im_loc", zero, default_scale=0.25)
 
 
         # Storage for per-(m,k) medians in physical space
@@ -576,8 +577,7 @@ class VIoptimized(Estimator):
                         f"L1 {mL1:.2f}±{sL1:.2f} | "
                         f"ZF_re {mZFr:.1f}±{sZFr:.1f} | ZF_im {mZFi:.1f}±{sZFi:.1f} | "
                         f"ZL_re {mZLr:.1f}±{sZLr:.1f} | ZL_im {mZLi:.1f}±{sZLi:.1f} | ")
-                       # f"L1_scale {L1_scale} | ZF_re_scale {ZFr_scale} | ZF_im_scale {ZFi_scale} | "
-                        #f"ZL_re_scale {ZLr_scale} | ZL_im_scale {ZLi_scale}")
+
 
                     idx = torch.tensor([0, 1, 2], device=L1_mean.device)
                     print("   samples:",
@@ -600,8 +600,7 @@ class VIoptimized(Estimator):
                 ZFi_med = self.ImZF_max * torch.tanh(ZFi_loc)
                 ZLr_med = self.ReZL_lo + (self.ReZL_hi - self.ReZL_lo) * torch.sigmoid(ZLr_loc)
                 ZLi_med = self.ImZL_max * torch.tanh(ZLi_loc)
-                print("L1 avg", torch.mean(L1_med).item())
-                print("ZF_re avg", torch.mean(ZFr_med).item())
+                
         # return { #[M] each
         #     "L1":    L1_med.float().cpu().numpy(), 
         #     "ZF_re": ZFr_med.float().cpu().numpy(),
