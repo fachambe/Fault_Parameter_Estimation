@@ -1,6 +1,5 @@
 import numpy as np
 import random
-import matplotlib.pyplot as plt
 import pyro
 from pyro.distributions.transforms import SigmoidTransform, AffineTransform
 from pyro.distributions import TransformedDistribution, constraints
@@ -92,7 +91,8 @@ def calculate_H_nw(Phi_network, n, Z_rec):
     Phi_12 = Phi_networkinv[:, :n, n:]
     Phi_21 = Phi_networkinv[:, n:, :n]
     Phi_22 = Phi_networkinv[:, n:, n:]
-
+    if torch.is_tensor(Z_rec):
+        Z_rec = Z_rec.detach().cpu().numpy()
     H_nw = np.linalg.inv(Phi_11 + Phi_12 @ np.linalg.inv(Z_rec))
     return H_nw
 
@@ -269,7 +269,7 @@ def calculate_cable_parameters(r_w, omega, n):
     return R, L_new, C_new, G_new
 # Function to compute constant impedance admittance matrix (type 1)
 def constant_impedance(R_const, C_leak, omega):
-    Z12 = Z13 = Z23 = torch.full_like(omega, R_const.item(), dtype=torch.complex64)  # Convert to array
+    Z12 = Z13 = Z23 = R_const * torch.ones_like(omega, dtype=torch.complex64)
     ZG1 = ZG2 = ZG3 = 1 / (1j * omega * C_leak)
     return Z12, Z13, Z23, ZG1, ZG2, ZG3
 
@@ -420,7 +420,7 @@ def loguniform(low, high, size=None):
 # ---- Define Network Parameter Dictionary ----
 network_params = {
     "cable_lengths": {  # 30 parameters, set all to 0.25
-        f"l_w_{i}": {"value": denormalize(0.25, 2, 20), "inferred": True, "range": (2, 20)}
+        f"l_w_{i}": {"value": denormalize(0.25, 2, 20), "inferred": False, "range": (2, 20)}
         for i in range(30)
     },
     "conductor_radii": {  # Fixed values, not inferred
@@ -710,27 +710,6 @@ def calculate_Hnw(cable_lengths, sampled_params):
     #hoverall = h5 @ h4 @ h3 @ h2 @ h1
     H1 = hoverall @ H_trans 
     H_nw_magnitude_db_1 = 20 * torch.log10(torch.abs(H1[:, 0, 0]))    
-
-
-    ABCD1 = calculate_cable_transmission_matrix(R_r, L_r, C_r, G_r, cable_lengths[f"l_w_{0}"], omega)
-
-    I3 = np.eye(3, dtype=complex)
-    I3 = np.repeat(I3[np.newaxis, :, :], num_freqs, axis=0)
-    Zeros3 = np.zeros(( num_freqs, 3, 3), dtype=complex)
-
-    Y0 = Y_loads["load_0"].detach().cpu().numpy()
-
-    # Ensure complex dtype (important if it might be real sometimes)
-    Y0 = Y0.astype(np.complex128, copy=False)
-    ABCD2 = np.block([
-        [I3, Zeros3],
-        [-Y0, I3]
-    ])
-    ABCD3 = calculate_cable_transmission_matrix(R_r, L_r, C_r, G_r, cable_lengths[f"l_w_{1}"], omega)
-    #ABCD4 = calculate_cable_transmission_matrix(R_s, L_s, C_s, G_s, cable_lengths[f"l_w_{1}"], omega)
-    h2 = calculate_H_nw(ABCD1 @ ABCD2 @ ABCD3, num_of_conductors-1, Z_rec)
-    H_nw_magnitude_db_2 = 20 * np.log10(np.abs(h2[:, 0, 0]))  # Convert magnitude to dB
- 
     
     return H_nw_magnitude_db_1
 
@@ -750,9 +729,19 @@ def model(H1_noisy):
     # cable_lengths = {
     #     key: torch.tensor(param["value"]) for key, param in network_params["cable_lengths"].items()
     # }
-    cable_lengths = {
-        key: param["value"] for key, param in network_params["cable_lengths"].items()
-    }
+    cable_lengths = {}
+    for cable_name, cable_info in network_params["cable_lengths"].items():
+        if cable_info["inferred"]:
+            lo, hi = cable_info["range"]
+            norm_sample = pyro.sample(f"{cable_name}", dist.Uniform(0.0, 1.0))
+            cable_lengths[cable_name] = denormalize(norm_sample, lo, hi)
+        else:
+            cable_lengths[cable_name] = torch.tensor(cable_info["value"]) #fixed at 0.25 if not inferred
+
+        
+    # cable_lengths = {
+    #     key: param["value"] for key, param in network_params["cable_lengths"].items()
+    # }
     H1_pred = calculate_Hnw(cable_lengths, load_params) 
     N, D = H1_noisy.shape  # e.g., (1000, 200)
 
@@ -761,8 +750,13 @@ def model(H1_noisy):
     with pyro.plate("data", N):  # Outer plate, tells pyro the 1000 observations are independent
         pyro.sample(
         "obs",
+        # dist.Independent(
+        #     dist.StudentT(df = 1.0, loc=H1_pred_expanded, scale=0.4),
+        #     reinterpreted_batch_ndims=1
+        # ),
+        # obs=H1_noisy
         dist.Independent(
-            dist.StudentT(df = 1.0, loc=H1_pred_expanded, scale=0.4),
+            dist.Normal(loc=H1_pred_expanded, scale=1.0),
             reinterpreted_batch_ndims=1
         ),
         obs=H1_noisy
@@ -788,101 +782,126 @@ def guide(H1_noisy):
             )
             
             pyro.sample(full_name, q)
+    for key, info in network_params["cable_lengths"].items():
+        if not info["inferred"]:
+            continue
+
+        loc = pyro.param(f"{key}_loc", torch.tensor(0.0))
+        scale = pyro.param(f"{key}_scale", torch.tensor(1.0), constraint=constraints.positive)
+
+        q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
+        pyro.sample(key, q)
+
 # --------------------------
 # Inference Function
 # --------------------------
-def run_inference(H1_noisy, model, guide):
+def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=2000):
     pyro.clear_param_store()
-    optimizer = optim.Adagrad({"lr": 0.05})
+    optimizer = optim.Adagrad({"lr": 0.2})
     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
 
-    num_steps = 10000
     losses = []
     param_history = defaultdict(list)
+
+    # Initialize parameters by running guide once
+    guide(H1_noisy)
+
+    # Save initial parameter values (step 0)
+    for name, value in pyro.get_param_store().items():
+        param_history[name].append(value.detach().clone())
 
     for step in range(num_steps):
         loss = svi.step(H1_noisy)
         losses.append(loss)
-
-        # Track all param values
         for name, value in pyro.get_param_store().items():
-            param_history[name].append(value.item())
-
-        # Print progress every 10 steps
-        if step % 10 == 0:
-            print(f"\n[Step {step}] ELBO Loss = {loss:.4f}")
-            print("Variational parameter means (normalized via sigmoid):")
+            param_history[name].append(value.detach().clone())
+            
+        if step % 50 == 0:
+            mus = []
             for name, value in pyro.get_param_store().items():
                 if name.endswith("_loc"):
-                    normalized_mean = torch.sigmoid(value).item()
-                    print(f"  {name}: {normalized_mean:.4f}")
-            
-        # # Print progress every 10 steps
-        # if step % 10 == 0:
-        #     print(f"\n[Step {step}] ELBO Loss = {loss:.4f}")
-        #     print("Current parameter means (normalized):")
-        #     print("Parameter means sorted by sensitivity:")
-        #     for key in sorted_keys:
-        #         # Convert "load_0.C_m_leak" → "load_0_C_m_leak"
-        #         pyro_key = key.replace(".", "_") + "_loc"
-        #         if pyro_key in pyro.get_param_store():
-        #             val = pyro.get_param_store()[pyro_key]
-        #             normalized_val = val.sigmoid().item()
-        #             print(f"  {pyro_key}: {normalized_val:.4f}")
+                    mus.append(torch.sigmoid(value).item())
+            mu_mean = sum(mus) / len (mus)
+            print(f"Curr step = {step} | ELBO = {loss} | Mean of all params = {mu_mean}")
+            print("\n=== Top 10 Sensitive Parameters (Variational Means) ===")
 
-    print("\nInference complete.")
+            param_store = pyro.get_param_store()
+
+            for name in sorted_keys[:10]:
+                pyro_name = name.replace(".", "_") + "_loc" #convert load_0.C_m_leak to load_0_C_m_leak_loc
+
+                if pyro_name in param_store:
+                    loc = param_store[pyro_name]
+                    q_mean = torch.sigmoid(loc).item()
+                    print(f"{name:30s} | q-mean = {q_mean:.4f}")
+                else:
+                    print(f"{name:30s} | q-mean = N/A")
+
+
+    print("Inference complete.")
     return losses, param_history
 
 
-def plot_param_convergence(param_history):
+def plot_param_convergence(param_history, losses, sorted_keys):
+    #Add ELBO plot too
     loc_keys = [k for k in param_history if k.endswith("_loc")]
     scale_keys = [k for k in param_history if k.endswith("_scale")]
 
-    plt.figure(figsize=(12, 5))
+    # --------- ELBO Plot (separate figure) ----------
+    plt.figure(figsize=(8, 6))
+    plt.plot(losses)
+    plt.title("SVI ELBO Loss")
+    plt.xlabel("SVI step")
+    plt.ylabel("ELBO loss")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig("svi_elbo_loss.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
-    # --- Plot loc ---
+    # --------- Parameter Plots (2 panels) ----------
+    plt.figure(figsize=(14, 5))
+
+    # (1) loc trajectories (normalized)
     plt.subplot(1, 2, 1)
     for key in loc_keys:
-        norm_vals = [torch.sigmoid(torch.tensor(x)).item() for x in param_history[key]]
-        plt.plot(norm_vals, label=key)
-    plt.title("Mean Convergence")
+        vals = torch.stack(param_history[key]) #Convert list of scalar tensor to a single vector tensor
+        norm_vals = torch.sigmoid(vals)
+        plt.plot(norm_vals.numpy(), alpha=0.7)
+    plt.title("Mean Convergence (normalized)")
     plt.xlabel("SVI step")
-    plt.ylabel("Mean (normalized)")
+    plt.ylabel("Variational mean (sigmoid(loc))")
     plt.grid(True)
 
-    # --- Plot scale ---
+    # (2) scale trajectories
     plt.subplot(1, 2, 2)
     for key in scale_keys:
-        plt.plot(param_history[key], label=key)
-    plt.title("Variance Convergence")
+        vals = torch.stack(param_history[key])
+        plt.plot(vals.numpy(), alpha=0.7)
+    plt.title("Scale Convergence")
     plt.xlabel("SVI step")
-    plt.ylabel("Scale (std dev)")
+    plt.ylabel("Variational scale (std dev)")
     plt.grid(True)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig("svi_param_convergence.png", dpi=300, bbox_inches='tight')
+    plt.close()
 
-def print_variational_means_by_sensitivity(sorted_keys, param_history):
-    print("\n--- Variational Means Ordered by Sensitivity ---")
+    # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
+    # Use last recorded loc value for each parameter
+    names_to_print = sorted_keys
 
-    for key in sorted_keys:
-        loc_key = f"{key}_loc"
+    print("\n=== Final Posterior Means (normalized), ranked by sensitivity ===")
 
-        if loc_key not in param_history:
-            print(f"{key}: NOT INFERRED")
+    for name in names_to_print:
+        pyro_loc_key = name.replace(".", "_") + "_loc"   # e.g. load_0.C_m_leak (outside pyro) -> load_0_C_m_leak_loc (inside pyro)
+
+        if pyro_loc_key not in param_history:
+            print(f"{name:30s} | q-mean = N/A (not in param_history)")
             continue
 
-        # Final unconstrained mean
-        final_loc = param_history[loc_key][-1]
-
-        # Convert to tensor if needed
-        if not torch.is_tensor(final_loc):
-            final_loc = torch.tensor(final_loc)
-
-        # Map to normalized space (same as plotting)
-        normalized_mean = torch.sigmoid(final_loc).item()
-
-        print(f"{key:<30s}  mean = {normalized_mean:.6f}")
+        final_loc = float(param_history[pyro_loc_key][-1])     # last stored loc (scalar)
+        q_mean = float(torch.sigmoid(torch.tensor(final_loc)).item())
+        print(f"{name:30s} | q-mean = {q_mean:.4f}")
 
 def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega, threshold=0.005):
     import copy
@@ -935,6 +954,7 @@ def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths
     # Normalize
     total_sum = sum(variations.values())
     normalized = {k: v / total_sum for k, v in variations.items()}
+    #contains sensitivites = v / total_sum now that sum up to 1, larger this number the more sensitive
 
     # Select parameters above threshold
     selected = [k for k, v in normalized.items() if v > threshold]
@@ -957,6 +977,7 @@ def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths
         network_params["cable_lengths"][cable_name]["inferred"] = cable_name in selected
 
     sorted_keys = sorted(normalized, key=normalized.get, reverse=True)
+    #key=normalized.get means sort keys by their values  and reverse=True means sort from largest to smallest sensitivity (value)
     return selected, sorted_keys
 
 # --------------------------
@@ -964,6 +985,7 @@ def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths
 # --------------------------
 if __name__ == '__main__':
     start_time = time.time()
+    
     # random.seed(45)
     # np.random.seed(45)
     # torch.manual_seed(45)
@@ -990,17 +1012,23 @@ if __name__ == '__main__':
     }
     selected, sorted_keys = perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega)
     
-    # Only infer top 3 from sensitivity
-    # selected_keys = {"load_0.C_m_leak", "load_20.C_m_leak", "load_2.C_leak", "load_0.C_m", "load_1.C_m_leak", "load_21.C_leak", "load_20.C_m", "load_19.C_leak", "load_10.C_d_leak", "load_4.C_d_leak"}
+    # Force only ONE inferred parameter
+    # selected = ["load_2.R_const"]
+    # sorted_keys = ["load_2.R_const"]
+    # selected = ["load_15.C_m_leak"]
+    # sorted_keys = ["load_15.C_m_leak"]
+    
+
+    # Turn OFF inference for everything
     # for load_name, params in network_params["loads"].items():
-    #     for param_name, param_info in params.items():
-    #         full_key = f"{load_name}.{param_name}"
-    #         param_info["inferred"] = full_key in selected_keys
+    #     for p_name, p_info in params.items():
+    #         p_info["inferred"] = False
 
-
+    # # Turn ON inference only for load_2.R_const
+    # network_params["loads"]["load_2"]["R_const"]["inferred"] = True
+    #network_params["loads"]["load_15"]["C_m_leak"]["inferred"] = True
     
-    
-    num_obs = 1000
+    num_obs = 1
     H1_clean = calculate_Hnw(cable_lengths, load_params)
     # print("H1_clean", H1_clean)
     # #print("H2_clean", H2_clean)
@@ -1021,158 +1049,8 @@ if __name__ == '__main__':
         for _ in range(num_obs)
     ])
     # Run SVI inference
-    losses, param_history = run_inference(H1_noisy, model, guide)
+    losses, param_history = run_inference(H1_noisy, model, guide, sorted_keys)
     # Plot the parameter convergence
-    plot_param_convergence(param_history)
+    plot_param_convergence(param_history, losses, sorted_keys)
 
     print("My program took", time.time() - start_time, "to run")
-
-
-# def model(H1_noisy):
-#     """ Pyro model defining priors and likelihood for H1_noisy """
-#     cable_lengths = {}
-#     load_params = {}
-
-#     for key, param in network_params["cable_lengths"].items():
-#         min_phys, max_phys = param["range"]
-#         # norm_center = 0.25
-#         # delta_norm = 1.0 / (max_phys - min_phys)
-#         # norm_lower = max(0.0, norm_center - delta_norm)
-#         # norm_upper = min(1.0, norm_center + delta_norm)
-#         norm_sample = pyro.sample(f"{key}", dist.Uniform(0.0, 1.0))
-#         length_meters = denormalize(norm_sample, min_phys, max_phys)
-#         cable_lengths[key] = length_meters
-
-    
-#     # Sample loads based on their type
-#     for load_name, params in network_params["loads"].items():
-#         load_dict = {}
-#         for param_name, param_info in params.items():
-#             if param_info["inferred"]:
-#                 min_val, max_val = param_info["range"]
-#                 # Normalize prior as Uniform in [0,1]
-#                 norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
-#                 load_dict[param_name] = denormalize(norm_sample, min_val, max_val)
-#             else:
-#                 load_dict[param_name] = torch.tensor(param_info["value"])
-#         load_params[load_name] = load_dict
-#     # --- Forward model --- Returns (N,) tensor of dtype float32 (Transfer Function Magnitude) given network parameters as input
-#     H1_pred = calculate_Hnw(cable_lengths, load_params) 
-#     # --- Noise and likelihood using Student-t ---
-#     pyro.sample("obs", dist.StudentT(df=1.0, loc=H1_pred, scale=0.4).to_event(1), obs=H1_noisy)
-
-# def guide(H1_noisy):
-#     """ Mean-field variational guide for all inferred parameters """
-    
-#     # --- Cable Lengths ---
-#     for key, param in network_params["cable_lengths"].items():
-#         if not param["inferred"]:
-#             continue
-#             # Learn variational parameters (mean and std) for normalized value
-#         loc = pyro.param(f"{key}_loc", torch.tensor(0.5), constraint=dist.constraints.unit_interval)
-#         scale = pyro.param(f"{key}_scale", torch.tensor(0.05), constraint=dist.constraints.positive)
-#         # Truncated Gaussian between [0, 1]
-#         q = TransformedDistribution(
-#             dist.Normal(loc, scale),
-#             [SigmoidTransform()]  # Truncate to (0,1)
-#         )
-#         pyro.sample(key, q)
-
-#     # --- Load Parameters ---
-#     for load_name, params in network_params["loads"].items():
-#         for param_name, param_info in params.items():
-#             if not param_info["inferred"]:
-#                 continue
-
-#             full_name = f"{load_name}_{param_name}"
-
-#             loc = pyro.param(f"{full_name}_loc", torch.tensor(0.5), constraint=dist.constraints.unit_interval)
-#             scale = pyro.param(f"{full_name}_scale", torch.tensor(0.05), constraint=dist.constraints.positive)
-
-#             q = TransformedDistribution(
-#                 dist.Normal(loc, scale),
-#                 [SigmoidTransform()]  # Truncate to (0,1)
-#             )
-
-#             pyro.sample(full_name, q)
-# def run_inference(H1_noisy, model, guide):
-#     pyro.clear_param_store()
-
-#     # AdaGrad optimizer with high learning rate as per the paper
-#     optimizer = optim.Adagrad({"lr": 0.6})
-
-#     # ELBO with 14 samples (particles)
-#     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=14))
-
-#     num_steps = 3000
-#     losses = []
-
-#     for step in range(num_steps):
-#         loss = svi.step(H1_noisy)
-#         losses.append(loss)
-#         if step % 100 == 0:
-#             print(f"[Step {step}] ELBO Loss = {loss:.4f}")
-
-#     print("Inference complete.")
-#     return losses
-# # ---- Initialize Network Parameters and Run Model ----
-# if __name__ == '__main__':
-#     # Generate load parameters and update global network_params
-#     total_params, load_types = generate_load_parameters(num_loads, omega)
-#     print(f"Total number of network parameters: {total_params}")
-#     print(f"Load type distribution: {load_types}")
-
-#     # Build cable_lengths and load_params from network_params
-#     cable_lengths = {
-#         key: torch.tensor(val["value"]) if not isinstance(val["value"], torch.Tensor) else val["value"]
-#         for key, val in network_params["cable_lengths"].items()
-#     }
-#     load_params = {}
-#     for load_name, params in network_params["loads"].items():
-#         load_dict = {
-#             param_name: torch.tensor(param_info["value"]) if not isinstance(param_info["value"], torch.Tensor) else param_info["value"]
-#             for param_name, param_info in params.items()
-#         }
-#         load_params[load_name] = load_dict
-#     # 1) Calculate H1
-#     H1 = calculate_Hnw(cable_lengths, load_params)
-#     # # 2) Add random noise with std dev of 1 dB
-#     noise_dB = np.random.normal(loc=0.0, scale=1.0, size=H1.shape)
-#     H1_noisy = H1 + noise_dB
-#     # # 3) Perform Inference
-#     losses = run_inference(H1_noisy, model, guide)
-#     #print("Zrec", Z_rec)
-#     # Run and trace the model
-#     # trace = poutine.trace(model).get_trace(123123)  # Pass in your observed data
-#     # trace.compute_log_prob()  # Optional: useful if you want to access log probs
-
-#     # Print all sample sites
-#     # for name, site in trace.iter_stochastic_nodes():
-#     #     print(f"{name}: {site['value']}")
-#     print("My program took", time.time() - start_time, "to run")
-
-    
-
-    # print("H1", H1.shape)
-    # plt.figure(figsize=(8,6))
-    # plt.plot(freq_range_mhz, H1, label=r"$H_{1,1}$ (Model)", color='b')
-    # #plt.xscale("log")
-    # #plt.plot(freq_range_mhz, H_nw2_noisy, label=r"$H_{1,1}$ (Model)(ABCD)", color='r')
-    # plt.xlabel("Frequency (MHz)", fontsize=12)
-    # plt.ylabel(r"Magnitude (dB)", fontsize=12)
-    # plt.title(r"$H_{1,1}$ Transfer Function in dB", fontsize=14)
-    # plt.grid(which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-    # plt.legend(fontsize=12)
-    # plt.tight_layout()
-
-    # plt.figure(figsize=(8,6))
-    # plt.plot(freq_range_mhz, H1, label=r"$H_{1,1}$ (Model)", color='b')
-    # plt.xscale("log")
-    # #plt.plot(freq_range_mhz, H_nw_magnitude_db_2, label=r"$H_{1,1}$ (Model)(ABCD)", color='r')
-    # plt.xlabel("Frequency (MHz)", fontsize=12)
-    # plt.ylabel(r"Magnitude (dB)", fontsize=12)
-    # plt.title(r"$H_{1,1}$ Transfer Function in dB", fontsize=14)
-    # plt.grid(which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-    # plt.legend(fontsize=12)
-    # plt.tight_layout()
-    # plt.show()
