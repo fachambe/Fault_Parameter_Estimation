@@ -791,14 +791,38 @@ def guide(H1_noisy):
 
         q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
         pyro.sample(key, q)
+def estimate_q_mean(loc, scale, num_samples=2048):
+    q = TransformedDistribution(
+        dist.Normal(loc, scale),
+        [SigmoidTransform()]
+    )
+    with torch.no_grad():
+        return q.sample((num_samples,)).mean().item()
+def estimate_sigmoid_normal_means(loc, scale, num_samples=2048):
+    """
+    Returns:
+      sigmoid_loc: sigmoid(E[z]) = sigmoid(loc)
+      mc_mean:     E[sigmoid(z)] estimated by Monte Carlo sampling
+    """
+    with torch.no_grad():
+        sigmoid_loc = torch.sigmoid(loc).item()
 
+        q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
+        mc_mean = q.sample((num_samples,)).mean().item()
+
+    return sigmoid_loc, mc_mean
+def mc_theta_mean_from_loc_scale(loc, scale, num_samples=256):
+    with torch.no_grad():
+        q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
+        return q.sample((num_samples,)).mean()
 # --------------------------
 # Inference Function
 # --------------------------
 def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=2000):
     pyro.clear_param_store()
+    #optimizer = pyro.optim.ClippedAdam({"lr": 0.01, "clip_norm": 5.0})
     optimizer = optim.Adagrad({"lr": 0.2})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
 
     losses = []
     param_history = defaultdict(list)
@@ -813,29 +837,99 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=2000):
     for step in range(num_steps):
         loss = svi.step(H1_noisy)
         losses.append(loss)
-        for name, value in pyro.get_param_store().items():
-            param_history[name].append(value.detach().clone())
-            
+
+        param_store = pyro.get_param_store()
+        for name, value in param_store.items():
+            if name.endswith("_loc"):
+                scale_name = name.replace("_loc", "_scale")
+                loc = value
+                scale = param_store[scale_name]
+                mc_mean = mc_theta_mean_from_loc_scale(loc, scale, num_samples=256)
+                param_history[name].append(mc_mean.detach().clone())
+            else:
+                param_history[name].append(value.detach().clone())
         if step % 50 == 0:
-            mus = []
-            for name, value in pyro.get_param_store().items():
-                if name.endswith("_loc"):
-                    mus.append(torch.sigmoid(value).item())
-            mu_mean = sum(mus) / len (mus)
-            print(f"Curr step = {step} | ELBO = {loss} | Mean of all params = {mu_mean}")
-            print("\n=== Top 10 Sensitive Parameters (Variational Means) ===")
 
-            param_store = pyro.get_param_store()
+            sigloc_list = []
+            mc_list = []
 
-            for name in sorted_keys[:10]:
-                pyro_name = name.replace(".", "_") + "_loc" #convert load_0.C_m_leak to load_0_C_m_leak_loc
+            for k in param_store:
+                if k.endswith("_loc"):
+                    k_scale = k.replace("_loc", "_scale")
+                    if k_scale not in param_store:
+                        continue
 
-                if pyro_name in param_store:
-                    loc = param_store[pyro_name]
-                    q_mean = torch.sigmoid(loc).item()
-                    print(f"{name:30s} | q-mean = {q_mean:.4f}")
+                    loc = param_store[k]
+                    scale = param_store[k_scale]
+
+                    sigmoid_loc, mc_mean = estimate_sigmoid_normal_means(loc, scale, num_samples=1024)
+                    sigloc_list.append(sigmoid_loc)
+                    mc_list.append(mc_mean)
+
+            sigloc_mean = sum(sigloc_list) / len(sigloc_list)
+            mc_mean_all = sum(mc_list) / len(mc_list)
+
+            print(
+                f"Curr step = {step} | ELBO = {loss:.3f} | "
+                f"Mean(sigmoid(loc)) = {sigloc_mean:.6f} | Mean(E_q[sigmoid(z)]) = {mc_mean_all:.6f}"
+            )
+
+            print("\n=== Top 20 Sensitive Parameters (Variational Means) ===")
+            for name in sorted_keys[:20]:
+                pyro_loc = name.replace(".", "_") + "_loc"
+                pyro_scale = name.replace(".", "_") + "_scale"
+
+                if pyro_loc in param_store and pyro_scale in param_store:
+                    loc = param_store[pyro_loc]
+                    scale = param_store[pyro_scale]
+
+                    sigmoid_loc, mc_mean = estimate_sigmoid_normal_means(loc, scale, num_samples=2048)
+
+                    print(
+                        f"{name:30s} | sigmoid(loc) = {sigmoid_loc:.6f} | E_q[sigmoid(z)] ≈ {mc_mean:.6f}"
+                    )
                 else:
-                    print(f"{name:30s} | q-mean = N/A")
+                    print(f"{name:30s} | N/A")
+        # if step % 50 == 0:
+        #     param_store = pyro.get_param_store()
+        #     mus = []
+        #     for name in param_store:
+        #         if name.endswith("_loc"):
+        #             scale_name = name.replace("_loc", "_scale")
+        #             if scale_name in param_store:
+        #                 loc = param_store[name]
+        #                 scale = param_store[scale_name]
+        #                 q_mean = estimate_q_mean(loc, scale)
+        #                 mus.append(q_mean)
+        #     # mus = []
+        #     # for name, value in pyro.get_param_store().items():
+        #     #     if name.endswith("_loc"):
+        #     #         mus.append(torch.sigmoid(value).item())
+        #     mu_mean = sum(mus) / len (mus)
+        #     print(f"Curr step = {step} | ELBO = {loss} | Mean of all params = {mu_mean}")
+        #     print("\n=== Top 20 Sensitive Parameters (Variational Means) ===")
+
+        #     param_store = pyro.get_param_store()
+
+        #     for name in sorted_keys[:20]:
+        #         pyro_loc = name.replace(".", "_") + "_loc"
+        #         pyro_scale = name.replace(".", "_") + "_scale"
+
+        #         if pyro_loc in param_store and pyro_scale in param_store:
+        #             loc = param_store[pyro_loc]
+        #             scale = param_store[pyro_scale]
+        #             q_mean = estimate_q_mean(loc, scale)
+        #             print(f"{name:30s} | q-mean = {q_mean:.6f}")
+        #         else:
+        #             print(f"{name:30s} | q-mean = N/A")
+        #         # pyro_name = name.replace(".", "_") + "_loc" #convert load_0.C_m_leak to load_0_C_m_leak_loc
+
+        #         # if pyro_name in param_store:
+        #         #     loc = param_store[pyro_name]
+        #         #     q_mean = torch.sigmoid(loc).item()
+        #         #     print(f"{name:30s} | q-mean = {q_mean:.4f}")
+        #         # else:
+        #         #     print(f"{name:30s} | q-mean = N/A")
 
 
     print("Inference complete.")
@@ -855,7 +949,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.ylabel("ELBO loss")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("svi_elbo_loss.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_elbo_loss20000.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- Parameter Plots (2 panels) ----------
@@ -883,7 +977,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("svi_param_convergence.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_param_convergence20000.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
@@ -1017,6 +1111,8 @@ if __name__ == '__main__':
     # sorted_keys = ["load_2.R_const"]
     # selected = ["load_15.C_m_leak"]
     # sorted_keys = ["load_15.C_m_leak"]
+    # selected = ["load_1.C_m"]
+    # sorted_keys = ["load_1.C_m"]
     
 
     # Turn OFF inference for everything
@@ -1024,9 +1120,10 @@ if __name__ == '__main__':
     #     for p_name, p_info in params.items():
     #         p_info["inferred"] = False
 
-    # # Turn ON inference only for load_2.R_const
-    # network_params["loads"]["load_2"]["R_const"]["inferred"] = True
-    #network_params["loads"]["load_15"]["C_m_leak"]["inferred"] = True
+    # Turn ON inference only for load_2.R_const
+    #network_params["loads"]["load_2"]["R_const"]["inferred"] = True
+    # network_params["loads"]["load_15"]["C_m_leak"]["inferred"] = True
+    # network_params["loads"]["load_1"]["C_m"]["inferred"] = True
     
     num_obs = 1
     H1_clean = calculate_Hnw(cable_lengths, load_params)
