@@ -420,7 +420,7 @@ def loguniform(low, high, size=None):
 # ---- Define Network Parameter Dictionary ----
 network_params = {
     "cable_lengths": {  # 30 parameters, set all to 0.25
-        f"l_w_{i}": {"value": denormalize(0.25, 2, 20), "inferred": True, "range": (2, 20), "infer_range": (5.5, 7.5)}
+        f"l_w_{i}": {"value": denormalize(0.25, 2, 20), "inferred": True, "range": (2, 20), "infer_range": (6.0, 8.0)}
         for i in range(30)
     },
     "conductor_radii": {  # Fixed values, not inferred
@@ -723,7 +723,13 @@ def model(H1_noisy):
                 norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
                 load_dict[param_name] = denormalize(norm_sample, min_val, max_val)
             else:
-                load_dict[param_name] = torch.tensor(param_info["value"])
+                # Use middle of range (0.5) instead of true value for non-inferred params
+                # Some params (like R_m2) have no range - use stored value for those
+                if "range" in param_info:
+                    min_val, max_val = param_info["range"]
+                    load_dict[param_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+                else:
+                    load_dict[param_name] = torch.tensor(param_info["value"])
         load_params[load_name] = load_dict
 
     cable_lengths = {}
@@ -736,7 +742,9 @@ def model(H1_noisy):
             physical_value = denormalize(norm_sample, infer_lo, infer_hi)
             cable_lengths[cable_name] = physical_value
         else:
-            cable_lengths[cable_name] = torch.tensor(cable_info["value"]) #fixed at 0.25 = 6.5m if not inferred
+            # Use middle of range (0.5) instead of true value for non-inferred cables
+            min_val, max_val = cable_info["infer_range"]
+            cable_lengths[cable_name] = torch.tensor(denormalize(0.5, min_val, max_val))
 
         
     # cable_lengths = {
@@ -812,7 +820,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
     pyro.clear_param_store()
     #optimizer = pyro.optim.ClippedAdam({"lr": 0.01, "clip_norm": 5.0})
     optimizer = optim.Adagrad({"lr": 0.02})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=30))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
 
     losses = []
     param_history = defaultdict(list) #Contains tensors
@@ -843,7 +851,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
                 # scale = param_store[scale_name]
                 # mc_mean = mc_theta_mean_from_loc_scale(loc, scale, num_samples=256)
                 #param_history[name].append(mc_mean.detach().clone())
-                    param_history[name].append(torch.sigmoid(value).detach().clone() - 0.25)
+                    param_history[name].append(torch.sigmoid(value).detach().clone())
                 else:
                     param_history[name].append(torch.sigmoid(value).detach().clone())
             else:
@@ -861,7 +869,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
                     sigmoid_loc, mc_mean = estimate_sigmoid_normal_means(loc, scale, num_samples=2048)
                     if(name in network_params["cable_lengths"]):
                         print(
-                            f"{name:30s} | sigmoid(loc) = {sigmoid_loc - 0.25:.6f} | E_q[sigmoid(z)] ≈ {mc_mean - 0.25:.6f} | True value = {0.25}"
+                            f"{name:30s} | sigmoid(loc) = {sigmoid_loc:.6f} | E_q[sigmoid(z)] ≈ {mc_mean:.6f} | True value = {0.25}"
                         )
                     else:
                         print(
@@ -888,7 +896,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.ylabel("ELBO loss")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("svi_elbo_loss_allparams4.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_elbo_loss_allparams7.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- Parameter Plots (2 panels) ----------
@@ -915,7 +923,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("svi_param_convergence_allparam4.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_param_convergence_allparam7.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
@@ -1011,6 +1019,104 @@ def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths
     #key=normalized.get means sort keys by their values  and reverse=True means sort from largest to smallest sensitivity (value)
     return selected, sorted_keys
 
+def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
+    # Collect final posterior loc and scale for each inferred parameter
+    posterior_params = {}
+    for name in sorted_keys:
+        pyro_loc_key = name.replace(".", "_") + "_loc"
+        pyro_scale_key = name.replace(".", "_") + "_scale"
+        if pyro_loc_key not in param_history:
+            continue
+        # Get final loc and scale values
+        final_loc = float(param_history[pyro_loc_key][-1])
+        final_scale = float(param_history[pyro_scale_key][-1])
+
+        #Determine the range for denormalization
+        if name in network_params["cable_lengths"]:
+            info = network_params["cable_lengths"][name]
+            lo, hi = info.get("infer_range", info["range"])
+        else:
+            load_name, param_name = name.split(".")
+            info = network_params["loads"][load_name][param_name]
+            lo, hi = info["range"]
+        
+        posterior_params[name] = {
+            "loc": final_loc,
+            "scale": final_scale,
+            "range": (lo, hi)
+        }
+
+    # Sample from posterior and compute TF for each sample
+    tf_samples = []
+
+    for i in range(num_samples):
+        # Build sampled cable_lengths and load_params
+        sampled_cable_lengths = {}
+        sampled_load_params = {}
+        
+        # Initialize load_params structure from network_params
+        for load_name, params in network_params["loads"].items():
+            sampled_load_params[load_name] = {}
+            for param_name, param_info in params.items():
+                # Use middle of range (0.5) for non-inferred params (not true value)
+                # Some params (like R_m2) have no range - use stored value for those
+                if "range" in param_info:
+                    min_val, max_val = param_info["range"]
+                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+                else:
+                    sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"])
+            # Initialize cable_lengths from network_params
+        for cable_name, cable_info in network_params["cable_lengths"].items():
+            # Use middle of range (0.5) for non-inferred cables (not true value)
+            min_val, max_val = cable_info["range"]
+            sampled_cable_lengths[cable_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+
+        # Now override with samples from posterior for inferred params
+        for name, pinfo in posterior_params.items():
+            loc, scale = pinfo["loc"], pinfo["scale"]
+            lo, hi = pinfo["range"]
+            
+            # Sample from Normal(loc, scale) then apply sigmoid
+            z = torch.normal(mean=torch.tensor(loc), std=torch.tensor(scale))
+            norm_sample = torch.sigmoid(z).item()
+            physical_value = denormalize(norm_sample, lo, hi)
+            
+            if name in network_params["cable_lengths"]:
+                sampled_cable_lengths[name] = torch.tensor(physical_value)
+            else:
+                load_name, param_name = name.split(".")
+                sampled_load_params[load_name][param_name] = torch.tensor(physical_value)
+        
+        # Compute TF with sampled parameters
+        H_sample = calculate_Hnw(sampled_cable_lengths, sampled_load_params)
+        tf_samples.append(H_sample.detach().numpy())
+
+    # Stack samples: (num_samples, num_freqs)
+    tf_samples = np.stack(tf_samples, axis=0)
+    
+    # Compute mean and percentiles
+    tf_mean = np.mean(tf_samples, axis=0)
+    tf_lower = np.percentile(tf_samples, 2.5, axis=0)
+    tf_upper = np.percentile(tf_samples, 97.5, axis=0)
+    
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(freq_range_mhz.numpy(), tf_mean, 'k-', linewidth=1.5, label='Model')
+    plt.plot(freq_range_mhz.numpy(), true_tf.detach().numpy(), 'r--', linewidth=1.5, label='Truth')
+    plt.fill_between(freq_range_mhz.numpy(), tf_lower, tf_upper, 
+                     alpha=0.3, color='steelblue', label='95% CI')
+    
+    plt.xscale('log')
+    plt.xlabel('Frequency (MHz)', fontsize=12)
+    plt.ylabel(r'$H_{1,1}$ (dB)', fontsize=12)
+    plt.legend(loc='lower left', fontsize=10)
+    plt.grid(True, which='both', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig('tf_posterior_CI2.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved figure to tf_posterior_CI2.png")
+    return tf_mean, tf_lower, tf_upper
 # --------------------------
 # Entry Point
 # --------------------------
@@ -1041,7 +1147,7 @@ if __name__ == '__main__':
         for load_name, params in network_params["loads"].items()
     }
     selected, sorted_keys = perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega)
-    
+
     # Force only ONE inferred parameter
     # selected = ["load_2.R_const"]
     # sorted_keys = ["load_2.R_const"]
@@ -1085,5 +1191,6 @@ if __name__ == '__main__':
     losses, param_history = run_inference(H1_noisy, model, guide, sorted_keys)
     # Plot the parameter convergence
     plot_param_convergence(param_history, losses, sorted_keys)
-
+    #Confidence Interval + Predicted TF
+    plot_CI_and_pred_TF(param_history, sorted_keys, H1_clean)
     print("My program took", time.time() - start_time, "to run")
