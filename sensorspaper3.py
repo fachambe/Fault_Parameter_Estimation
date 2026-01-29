@@ -819,7 +819,7 @@ def estimate_sigmoid_normal_means(loc, scale, num_samples=2048):
 def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
     pyro.clear_param_store()
     #optimizer = pyro.optim.ClippedAdam({"lr": 0.01, "clip_norm": 5.0})
-    optimizer = optim.Adagrad({"lr": 0.02})
+    optimizer = optim.Adagrad({"lr": 0.2})
     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
 
     losses = []
