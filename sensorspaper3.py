@@ -814,12 +814,12 @@ def estimate_sigmoid_normal_means(loc, scale, num_samples=2048):
 # --------------------------
 # Inference Function
 # --------------------------
-def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=2000):
+def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=50):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
     #optimizer = pyro.optim.ClippedAdam({"lr": 0.01, "clip_norm": 5.0})
     optimizer = optim.Adagrad({"lr": 0.2})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
 
     losses = []
     param_history = defaultdict(list) #Contains tensors
@@ -895,7 +895,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.ylabel("ELBO loss")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("svi_elbo_loss_allparams7.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_elbo_loss_allparamstest.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- Parameter Plots (2 panels) ----------
@@ -922,7 +922,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("svi_param_convergence_allparam7.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_param_convergence_allparamtest.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
@@ -1019,6 +1019,12 @@ def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths
     return selected, sorted_keys
 
 def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
+    # Convert true_tf to magnitude in dB if it's complex
+    if true_tf.is_complex():
+        true_tf_db = 20 * torch.log10(torch.abs(true_tf))
+    else:
+        true_tf_db = true_tf  # Assume already in dB
+
     # Collect final posterior loc and scale for each inferred parameter
     posterior_params = {}
     for name in sorted_keys:
@@ -1088,7 +1094,7 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
         
         # Compute TF with sampled parameters
         H_sample = calculate_Hnw(sampled_cable_lengths, sampled_load_params)
-        tf_samples.append(20*torch.log10(H_sample).detach().numpy())
+        tf_samples.append(20*torch.log10(torch.abs(H_sample)).detach().numpy())
 
     # Stack samples: (num_samples, num_freqs)
     tf_samples = np.stack(tf_samples, axis=0)
@@ -1101,7 +1107,7 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
     # Plot
     plt.figure(figsize=(10, 6))
     plt.plot(freq_range_mhz.numpy(), tf_mean, 'k-', linewidth=1.5, label='Model')
-    plt.plot(freq_range_mhz.numpy(), true_tf.detach().numpy(), 'r--', linewidth=1.5, label='Truth')
+    plt.plot(freq_range_mhz.numpy(), true_tf_db.detach().numpy(), 'r--', linewidth=1.5, label='Truth')
     plt.fill_between(freq_range_mhz.numpy(), tf_lower, tf_upper, 
                      alpha=0.3, color='steelblue', label='95% CI')
     
@@ -1114,7 +1120,7 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
     plt.savefig('tf_posterior_CI2.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"Saved figure to tf_posterior_CI2.png")
+    print(f"Saved figure to tf_posterior_CItest.png")
     return tf_mean, tf_lower, tf_upper
 # --------------------------
 # Entry Point
