@@ -709,11 +709,14 @@ def calculate_Hnw(cable_lengths, sampled_params):
     hoverall = h1 @ h2 @ h3 @ h4 @ h5
     #hoverall = h5 @ h4 @ h3 @ h2 @ h1
     H1 = hoverall @ H_trans 
-    H_nw_magnitude_db_1 = 20 * torch.log10(torch.abs(H1[:, 0, 0]))    
-    
+    #H_nw_magnitude_db_1 = 20 * torch.log10(torch.abs(H1[:, 0, 0]))    
+    H_nw = H1[:, 0, 0]
+    return H_nw
     return H_nw_magnitude_db_1
 
 def model(H1_noisy):
+    # H1_noisy is (N, F, 2), float NOT COMPLEX
+    N, F, _ = H1_noisy.shape  
     load_params = {}
     for load_name, params in network_params["loads"].items():
         load_dict = {}
@@ -727,7 +730,7 @@ def model(H1_noisy):
                 # Some params (like R_m2) have no range - use stored value for those
                 if "range" in param_info:
                     min_val, max_val = param_info["range"]
-                    load_dict[param_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+                    load_dict[param_name] = torch.tensor(denormalize(0.25, min_val, max_val))
                 else:
                     load_dict[param_name] = torch.tensor(param_info["value"])
         load_params[load_name] = load_dict
@@ -744,18 +747,12 @@ def model(H1_noisy):
         else:
             # Use middle of range (0.5) instead of true value for non-inferred cables
             min_val, max_val = cable_info["infer_range"]
-            cable_lengths[cable_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+            cable_lengths[cable_name] = torch.tensor(denormalize(0.25, min_val, max_val))
 
         
-    # cable_lengths = {
-    #     key: param["value"] for key, param in network_params["cable_lengths"].items()
-    # }
-    H1_pred = calculate_Hnw(cable_lengths, load_params) 
-    N, D = H1_noisy.shape  # e.g., (1000, 200)
-
-    H1_pred_expanded = H1_pred.unsqueeze(0).expand(N, -1)
-    #print("what is this shape", H1_pred_expanded.shape)
-    with pyro.plate("data", N):  # Outer plate, tells pyro the 1000 observations are independent
+    H1_pred_c = calculate_Hnw(cable_lengths, load_params).unsqueeze(0).expand(N, -1) #[N, F] complex 
+    H1_pred = torch.view_as_real(H1_pred_c) #[N, F, 2] real 
+    with pyro.plate("data", N):  # Outer plate, tells pyro all N observations are independent
         pyro.sample(
         "obs",
         # dist.Independent(
@@ -763,9 +760,10 @@ def model(H1_noisy):
         #     reinterpreted_batch_ndims=1
         # ),
         # obs=H1_noisy
+        #0.00022655
         dist.Independent(
-            dist.Normal(loc=H1_pred_expanded, scale=1.0),
-            reinterpreted_batch_ndims=1
+            dist.Normal(loc=H1_pred, scale=0.00022655),
+            reinterpreted_batch_ndims=2 #event dims are (F, 2)
         ),
         obs=H1_noisy
     )
@@ -816,11 +814,12 @@ def estimate_sigmoid_normal_means(loc, scale, num_samples=2048):
 # --------------------------
 # Inference Function
 # --------------------------
-def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
+def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=2000):
+    # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
     #optimizer = pyro.optim.ClippedAdam({"lr": 0.01, "clip_norm": 5.0})
-    optimizer = optim.Adagrad({"lr": 0.02})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
+    optimizer = optim.Adagrad({"lr": 0.2})
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
 
     losses = []
     param_history = defaultdict(list) #Contains tensors
@@ -856,7 +855,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
                     param_history[name].append(torch.sigmoid(value).detach().clone())
             else:
                 param_history[name].append(value.detach().clone())
-        if step % 50 == 0 or step == 0:
+        if step % 25 == 0 or step == 0:
             print(f"\n=== Top 20 Sensitive Parameters (Variational Means) at step {step} | ELBO is {loss} ===")
             for name in sorted_keys[:20]:
                 #load_0.C_m_leak -> load_0_C_m_leak_loc
@@ -942,11 +941,11 @@ def plot_param_convergence(param_history, losses, sorted_keys):
         q_mean = float(param_history[pyro_loc_key][-1])     #  pull last entry from param history
         print(f"{name:30s} | q-mean = {q_mean:.4f}")
 
-def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega, threshold=0.005):
+def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega, threshold=0.01):
     import copy
 
-    nominal_H = calculate_Hnw(cable_lengths, load_params)
-    variations = {}
+    nominal_H = calculate_Hnw(cable_lengths, load_params) #[200] complex
+    variations = {} 
 
     # Analyze load parameters
     for load_name, param_dict in network_params["loads"].items():
@@ -1089,7 +1088,7 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
         
         # Compute TF with sampled parameters
         H_sample = calculate_Hnw(sampled_cable_lengths, sampled_load_params)
-        tf_samples.append(H_sample.detach().numpy())
+        tf_samples.append(20*torch.log10(H_sample).detach().numpy())
 
     # Stack samples: (num_samples, num_freqs)
     tf_samples = np.stack(tf_samples, axis=0)
@@ -1147,33 +1146,58 @@ if __name__ == '__main__':
         for load_name, params in network_params["loads"].items()
     }
     selected, sorted_keys = perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega)
-
+    
     # Force only ONE inferred parameter
-    # selected = ["load_2.R_const"]
-    # sorted_keys = ["load_2.R_const"]
-    # selected = ["load_15.C_m_leak"]
-    # sorted_keys = ["load_15.C_m_leak"]
-    # selected = ["load_1.C_m"]
-    # sorted_keys = ["load_1.C_m"]
+    # selected = ["l_w_4", "l_w_25", "load_1.C_m_leak", "l_w_28", "l_w_24"]
+    # sorted_keys = ["l_w_4", "l_w_25", "load_1.C_m_leak", "l_w_28", "l_w_24"]
+    # # selected = ["load_15.C_m_leak"]
+    # # sorted_keys = ["load_15.C_m_leak"]
+    # # selected = ["load_1.C_m"]
+    # # sorted_keys = ["load_1.C_m"]
     
 
-    # Turn OFF inference for everything
+    # #Turn OFF inference for everything
     # for load_name, params in network_params["loads"].items():
     #     for p_name, p_info in params.items():
     #         p_info["inferred"] = False
+    # for cable_name, cable_info in network_params["cable_lengths"].items():
+    #         print("cable name", cable_info)
+    #         cable_info["inferred"] = False
+    # print("asdsad", network_params["cable_lengths"].items())
+    
+    
+    # # Turn ON inference only
+    # network_params["loads"]["load_1"]["C_m_leak"]["inferred"] = True
+    # network_params["cable_lengths"]["l_w_4"]["inferred"] = True
+    # network_params["cable_lengths"]["l_w_25"]["inferred"] = True
+    # network_params["cable_lengths"]["l_w_28"]["inferred"] = True
+    # network_params["cable_lengths"]["l_w_24"]["inferred"] = True
 
-    # Turn ON inference only for load_2.R_const
-    #network_params["loads"]["load_2"]["R_const"]["inferred"] = True
     # network_params["loads"]["load_15"]["C_m_leak"]["inferred"] = True
     # network_params["loads"]["load_1"]["C_m"]["inferred"] = True
     
     num_obs = 1
-    H1_clean = calculate_Hnw(cable_lengths, load_params)
+    H1_clean = calculate_Hnw(cable_lengths, load_params) #complex [200]
+
+    snr_db = 40
+    snr_lin = 10.0 ** (snr_db / 10.0)
+
+    sigpow  = torch.mean(torch.abs(H1_clean)**2)          
+    var_f   = (sigpow / snr_lin)                     
+    std_f   = torch.sqrt(var_f / 2) 
+
+    H1_noisy_c = H1_clean + std_f*torch.randn_like(H1_clean.real) + 1j*std_f*torch.randn_like(H1_clean.imag) #[F] complex
+    H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1) #[N, F] complex
+    H1_noisy = torch.view_as_real(H1_noisy_c_expanded) #[N, F, 2] real
+    
     # print("H1_clean", H1_clean)
+    # print("shape", H1_clean.shape)
+    
+    # #print("H1_clean", H1_clean)
     # #print("H2_clean", H2_clean)
     # plt.figure(figsize=(8,6))
-    # plt.plot(freq_range_mhz, H1_clean, label=r"$H_{1,1}$ (Model)", color='b')
-    # #plt.plot(freq_range_mhz, H2_clean, label=r"$H_{1,1}$ (Model)", color='r')
+    # plt.plot(freq_range_mhz, 20*torch.log10(H1_clean), label=r"$H_{1,1}$ (Model)", color='b')
+    # plt.plot(freq_range_mhz, 20*torch.log10(obs), label=r"$H_{1,1}$ (Model)", color='r')
     # plt.xscale("log")
     # plt.xlabel("Frequency (MHz)", fontsize=12)
     # plt.ylabel(r"Magnitude (dB)", fontsize=12)
@@ -1183,10 +1207,7 @@ if __name__ == '__main__':
     # plt.tight_layout()
     # plt.show()
     
-    H1_noisy = torch.stack([
-        H1_clean + torch.tensor(np.random.normal(0.0, 1.0, size=H1_clean.shape), dtype=torch.float32)
-        for _ in range(num_obs)
-    ])
+
     # Run SVI inference
     losses, param_history = run_inference(H1_noisy, model, guide, sorted_keys)
     # Plot the parameter convergence
