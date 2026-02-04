@@ -814,11 +814,11 @@ def estimate_sigmoid_normal_means(loc, scale, num_samples=2048):
 # --------------------------
 # Inference Function
 # --------------------------
-def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=50):
+def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=20000):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
     #optimizer = pyro.optim.ClippedAdam({"lr": 0.01, "clip_norm": 5.0})
-    optimizer = optim.Adagrad({"lr": 0.2})
+    optimizer = optim.Adagrad({"lr": 0.02})
     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
 
     losses = []
@@ -827,34 +827,19 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=50):
     # Initialize parameters by running guide once
     guide(H1_noisy)
 
-    # Save initial parameter values (should all be 0.5)
+    # Save initial parameter values 
     param_store = pyro.get_param_store()
     for name, value in param_store.items():
-        if name.endswith("_loc"):
-            param_history[name].append(torch.sigmoid(value).detach().clone())
-        else:
-            param_history[name].append(value.detach().clone())
+        param_history[name].append(value.detach().clone())
 
     for step in range(num_steps):
         loss = svi.step(H1_noisy)
         losses.append(loss)
 
         param_store = pyro.get_param_store()
-        #Save param values every step but need to -0.25 because technically should converge to 0.25 for cables
         for name, value in param_store.items():
-            if name.endswith("_loc"):
-                if name.replace("_loc", "") in network_params["cable_lengths"]:
+            param_history[name].append(value.detach().clone())
 
-                # scale_name = name.replace("_loc", "_scale")
-                # loc = value
-                # scale = param_store[scale_name]
-                # mc_mean = mc_theta_mean_from_loc_scale(loc, scale, num_samples=256)
-                #param_history[name].append(mc_mean.detach().clone())
-                    param_history[name].append(torch.sigmoid(value).detach().clone())
-                else:
-                    param_history[name].append(torch.sigmoid(value).detach().clone())
-            else:
-                param_history[name].append(value.detach().clone())
         if step % 25 == 0 or step == 0:
             print(f"\n=== Top 20 Sensitive Parameters (Variational Means) at step {step} | ELBO is {loss} ===")
             for name in sorted_keys[:20]:
@@ -866,14 +851,9 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps=50):
                     loc = param_store[pyro_loc]
                     scale = param_store[pyro_scale]
                     sigmoid_loc, mc_mean = estimate_sigmoid_normal_means(loc, scale, num_samples=2048)
-                    if(name in network_params["cable_lengths"]):
-                        print(
-                            f"{name:30s} | sigmoid(loc) = {sigmoid_loc:.6f} | E_q[sigmoid(z)] ≈ {mc_mean:.6f} | True value = {0.25}"
-                        )
-                    else:
-                        print(
-                            f"{name:30s} | sigmoid(loc) = {sigmoid_loc:.6f} | E_q[sigmoid(z)] ≈ {mc_mean:.6f} | True value = {0.25}"
-                        )
+                    print(
+                        f"{name:30s} | sigmoid(loc) = {sigmoid_loc:.6f} | E_q[sigmoid(z)] ≈ {mc_mean:.6f} | True value = {0.25}"
+                    )
                 else:
                     print(f"{name:30s} | N/A")
 
@@ -895,17 +875,18 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.ylabel("ELBO loss")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("svi_elbo_loss_allparamstest.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_elbo_loss_allparamsv2.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- Parameter Plots (2 panels) ----------
     plt.figure(figsize=(14, 5))
 
-    # (1) loc trajectories (normalized)
+    # (1) loc trajectories (normalized) - apply sigmoid since param_history stores raw loc
     plt.subplot(1, 2, 1)
     for key in loc_keys:
-        vals = torch.stack(param_history[key]) #Convert list of scalar tensor to a single vector tensor
-        plt.plot(vals.numpy(), alpha=0.7)
+        vals = torch.stack(param_history[key])  # Raw loc values (unconstrained)
+        vals_sigmoid = torch.sigmoid(vals)  # Apply sigmoid to get [0,1] normalized values
+        plt.plot(vals_sigmoid.numpy(), alpha=0.7)
     plt.title("Mean Convergence (normalized)")
     plt.xlabel("SVI step")
     plt.ylabel("Variational mean (sigmoid(loc))")
@@ -922,23 +903,23 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("svi_param_convergence_allparamtest.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_param_convergence_v2.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
-    # Use last recorded loc value for each parameter
     names_to_print = sorted_keys
 
     print("\n=== Final Posterior Means (normalized), ranked by sensitivity ===")
 
     for name in names_to_print:
-        pyro_loc_key = name.replace(".", "_") + "_loc"   # e.g. load_0.C_m_leak-> load_0_C_m_leak_loc 
+        pyro_loc_key = name.replace(".", "_") + "_loc"   # e.g. load_0.C_m_leak-> load_0_C_m_leak_loc
 
         if pyro_loc_key not in param_history:
             print(f"{name:30s} | q-mean = N/A (not in param_history)")
             continue
 
-        q_mean = float(param_history[pyro_loc_key][-1])     #  pull last entry from param history
+        raw_loc = float(param_history[pyro_loc_key][-1])  # Raw loc (unconstrained)
+        q_mean = torch.sigmoid(torch.tensor(raw_loc)).item()  # Apply sigmoid for normalized [0,1]
         print(f"{name:30s} | q-mean = {q_mean:.4f}")
 
 def perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega, threshold=0.01):
@@ -1032,7 +1013,7 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
         pyro_scale_key = name.replace(".", "_") + "_scale"
         if pyro_loc_key not in param_history:
             continue
-        # Get final loc and scale values
+        # Get final loc and scale values (raw, unconstrained - no sigmoid applied)
         final_loc = float(param_history[pyro_loc_key][-1])
         final_scale = float(param_history[pyro_scale_key][-1])
 
@@ -1051,7 +1032,6 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
             "range": (lo, hi)
         }
 
-    # Sample from posterior and compute TF for each sample
     tf_samples = []
 
     for i in range(num_samples):
@@ -1063,27 +1043,27 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
         for load_name, params in network_params["loads"].items():
             sampled_load_params[load_name] = {}
             for param_name, param_info in params.items():
-                # Use middle of range (0.5) for non-inferred params (not true value)
+                # Use TRUE value (0.25) for non-inferred params
                 # Some params (like R_m2) have no range - use stored value for those
                 if "range" in param_info:
                     min_val, max_val = param_info["range"]
-                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(0.25, min_val, max_val))
                 else:
                     sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"])
-            # Initialize cable_lengths from network_params
+        # Initialize cable_lengths from network_params
         for cable_name, cable_info in network_params["cable_lengths"].items():
-            # Use middle of range (0.5) for non-inferred cables (not true value)
+            # Use TRUE value (0.25) for non-inferred cables
             min_val, max_val = cable_info["range"]
-            sampled_cable_lengths[cable_name] = torch.tensor(denormalize(0.5, min_val, max_val))
+            sampled_cable_lengths[cable_name] = torch.tensor(denormalize(0.25, min_val, max_val))
 
-        # Now override with samples from posterior for inferred params
+        # Override with samples from posterior for inferred params
         for name, pinfo in posterior_params.items():
             loc, scale = pinfo["loc"], pinfo["scale"]
             lo, hi = pinfo["range"]
-            
-            # Sample from Normal(loc, scale) then apply sigmoid
+
+            # Sample from Normal(loc, scale) in unconstrained space, then apply sigmoid
             z = torch.normal(mean=torch.tensor(loc), std=torch.tensor(scale))
-            norm_sample = torch.sigmoid(z).item()
+            norm_sample = torch.sigmoid(z).item() 
             physical_value = denormalize(norm_sample, lo, hi)
             
             if name in network_params["cable_lengths"]:
@@ -1117,14 +1097,13 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig('tf_posterior_CI2.png', dpi=300, bbox_inches='tight')
+    plt.savefig('tf_posterior_CI_v2.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"Saved figure to tf_posterior_CItest.png")
+    print(f"Saved figure to tf_posterior_CI_v2.png")
     return tf_mean, tf_lower, tf_upper
-# --------------------------
-# Entry Point
-# --------------------------
+
+
 if __name__ == '__main__':
     start_time = time.time()
     # random.seed(45)
@@ -1220,4 +1199,6 @@ if __name__ == '__main__':
     plot_param_convergence(param_history, losses, sorted_keys)
     #Confidence Interval + Predicted TF
     plot_CI_and_pred_TF(param_history, sorted_keys, H1_clean)
+    # Compare inferred values vs top 20 set to true value
+    compare_inferred_vs_true_top20(param_history, sorted_keys, H1_clean, top_n=20)
     print("My program took", time.time() - start_time, "to run")
