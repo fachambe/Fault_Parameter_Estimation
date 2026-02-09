@@ -299,7 +299,7 @@ def compute_load_admittance_3d(load_params):
     - load_params (tuple of tensors): (Z12, Z13, Z23, ZG1, ZG2, ZG3)
       Each impedance tensor has shape (N,) with dtype torch.complex64.
     Returns:
-    - Y_load (torch.Tensor): Load admittance matrix with shape (N, n, n)
+    - Y_load (torch.Tensor): Load admittance matrix with shape (N, 3, 3)
     """
     Z12, Z13, Z23, ZG1, ZG2, ZG3 = load_params  # Unpack impedance values
 
@@ -429,6 +429,15 @@ network_params = {
     },
     "loads": {}  # Dynamically generated based on load type
 }
+def initialize_random_starts():
+    """Generate random initial values for non-inferred params once."""
+    for load_name, params in network_params["loads"].items():
+        for param_name, param_info in params.items():
+            if not param_info["inferred"] and "range" in param_info:
+                param_info["random_init"] = torch.rand(1).item()  # 0-1
+        for cable_name, cable_info in network_params["cable_lengths"].items():
+            if not cable_info["inferred"]:
+                cable_info["random_init"] = torch.rand(1).item()
 # ---- Define Network Constants ----
 num_loads = 22
 num_of_conductors = 4
@@ -590,6 +599,32 @@ def calculate_Htrans(YTalpha, YTbeta, YTgamma, Ynw, ZT0, ZT12, ZT21, ZT13, ZT31,
     H_trans_inv = torch.linalg.inv(H_trans)  # Shape: (N, 3, 3)
 
     return H_trans_inv
+def comopute_fault_admittance(Y_f, omega, fault_phase='all', n=3):
+    """
+    Compute shunt fault admittance matrix.
+    
+    Parameters:
+    - R_fault: Fault resistance to ground (Ohms). Lower = more severe fault.
+    - C_fault: Fault capacitance (F). Models insulation degradation.
+    - omega: (N,) angular frequencies
+    - fault_phase: 'all' for symmetric fault, or 0/1/2 for single-phase fault
+    - n: number of conductors - 1
+    
+    Returns:
+    - Y_fault: (N, n, n) fault admittance matrix
+    """
+    N = len(omega)
+    Y_fault = torch.zeros(N, n, n, dtype=torch.complex64)
+
+    if fault_phase == 'all':
+        # Symmetric fault on all phases
+        for i in range(n):
+            Y_fault[:, i, i] = Y_f
+    else:
+        # Single-phase fault
+        Y_fault[:, fault_phase, fault_phase] = Y_f
+    
+    return Y_fault
 
 def calculate_Hnw(cable_lengths, sampled_params):
     """
@@ -730,7 +765,7 @@ def model(H1_noisy):
                 # Some params (like R_m2) have no range - use stored value for those
                 if "range" in param_info:
                     min_val, max_val = param_info["range"]
-                    load_dict[param_name] = torch.tensor(denormalize(0.25, min_val, max_val))
+                    load_dict[param_name] = torch.tensor(denormalize(param_info.get("random_init", 0.5), min_val, max_val))
                 else:
                     load_dict[param_name] = torch.tensor(param_info["value"])
         load_params[load_name] = load_dict
@@ -747,7 +782,7 @@ def model(H1_noisy):
         else:
             # Use middle of range (0.5) instead of true value for non-inferred cables
             min_val, max_val = cable_info["infer_range"]
-            cable_lengths[cable_name] = torch.tensor(denormalize(0.25, min_val, max_val))
+            cable_lengths[cable_name] = torch.tensor(denormalize(param_info.get("random_init", 0.5), min_val, max_val))
 
         
     H1_pred_c = calculate_Hnw(cable_lengths, load_params).unsqueeze(0).expand(N, -1) #[N, F] complex 
@@ -875,7 +910,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.ylabel("ELBO loss")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig("svi_elbo_loss_allparamsv2.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_elbo_loss_tr001_lr002_random.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- Parameter Plots (2 panels) ----------
@@ -903,7 +938,7 @@ def plot_param_convergence(param_history, losses, sorted_keys):
     plt.grid(True)
 
     plt.tight_layout()
-    plt.savefig("svi_param_convergence_v2.png", dpi=300, bbox_inches='tight')
+    plt.savefig("svi_param_convergence_tr001_lr002_random.png", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
@@ -1047,14 +1082,14 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
                 # Some params (like R_m2) have no range - use stored value for those
                 if "range" in param_info:
                     min_val, max_val = param_info["range"]
-                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(0.25, min_val, max_val))
+                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(param_info.get("random_init", 0.5), min_val, max_val))
                 else:
                     sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"])
         # Initialize cable_lengths from network_params
         for cable_name, cable_info in network_params["cable_lengths"].items():
             # Use TRUE value (0.25) for non-inferred cables
             min_val, max_val = cable_info["range"]
-            sampled_cable_lengths[cable_name] = torch.tensor(denormalize(0.25, min_val, max_val))
+            sampled_cable_lengths[cable_name] = torch.tensor(denormalize(param_info.get("random_init", 0.5), min_val, max_val))
 
         # Override with samples from posterior for inferred params
         for name, pinfo in posterior_params.items():
@@ -1097,10 +1132,10 @@ def plot_CI_and_pred_TF(param_history, sorted_keys, true_tf, num_samples=200):
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig('tf_posterior_CI_v2.png', dpi=300, bbox_inches='tight')
+    plt.savefig('tf_posterior_CI_tr001_lr002_random.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    print(f"Saved figure to tf_posterior_CI_v2.png")
+    print(f"Saved figure to tf_posterior_CI_tr001_lr002_random.png")
     return tf_mean, tf_lower, tf_upper
 
 
@@ -1131,6 +1166,7 @@ if __name__ == '__main__':
         for load_name, params in network_params["loads"].items()
     }
     selected, sorted_keys = perform_load_sensitivity_analysis(load_params, network_params, cable_lengths, omega)
+    initialize_random_starts()
     
     # Force only ONE inferred parameter
     # selected = ["l_w_4", "l_w_25", "load_1.C_m_leak", "l_w_28", "l_w_24"]
@@ -1199,6 +1235,4 @@ if __name__ == '__main__':
     plot_param_convergence(param_history, losses, sorted_keys)
     #Confidence Interval + Predicted TF
     plot_CI_and_pred_TF(param_history, sorted_keys, H1_clean)
-    # Compare inferred values vs top 20 set to true value
-    compare_inferred_vs_true_top20(param_history, sorted_keys, H1_clean, top_n=20)
     print("My program took", time.time() - start_time, "to run")
