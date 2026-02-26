@@ -28,6 +28,7 @@ class ForwardModel:
         assert L1.shape == ZF.shape == ZL.shape, "L1, ZF, ZL must share the same shape [..., N]"
         *batch, N = L1.shape
         has_batch = len(batch) > 0
+
         if has_batch:
             B = int(np.prod(batch)) if has_batch else 1
             # Flatten batch dimensions to [B*N]

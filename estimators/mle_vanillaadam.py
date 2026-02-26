@@ -1,5 +1,11 @@
 import torch
+import numpy as np
+import pyro
+import pyro.distributions as dist
+from pyro.infer import SVI, Trace_ELBO
+from pyro.infer.autoguide import AutoNormal
 from .lfbgs import batched_lbfgs
+import matplotlib.pyplot as plt
 from .base import Estimator  # keep your existing Estimator base
 torch.set_float32_matmul_precision("high")
 
@@ -29,7 +35,7 @@ class VanillaAdam(Estimator):
 
     Parameterization:
       L1    in [0, L]             via sigmoid
-      ReZF  in [1, 2000]          via sigmoid
+      ReZF  in [1, 4000]          via sigmoid
       ImZF  in [-100, +100]       via tanh
       ReZL  in [1, 200]           via sigmoid
       ImZL  in [-100, +100]       via tanh
@@ -49,7 +55,7 @@ class VanillaAdam(Estimator):
                  likelihood,
                  L: float = 1000.0,
                  device="cuda",
-                 n_starts: int = 200,
+                 n_starts: int = 1,
                  adam_steps: int = 400,
                  adam_lr: float = 1e-3,
                  use_lbfgs: bool = True, 
@@ -73,7 +79,7 @@ class VanillaAdam(Estimator):
         # parameter range
         self.L1_lo, self.L1_hi = 1.0, self.L
         self.ReZF_lo, self.ReZF_hi = 1.0, 4000.0
-        self.ImZF_max = 100.0
+        self.ImZF_min, self.ImZF_max = -100.0, 100.0
         self.ReZL_lo, self.ReZL_hi = 1.0, 200.0
         self.ImZL_max = 100.0
 
@@ -141,8 +147,203 @@ class VanillaAdam(Estimator):
         ll = -((diff.abs()**2) / var_f.unsqueeze(1)).sum(dim=-1)  # [M,R] Sum over F 
         return -ll   # NLL [M,R]
 
+    def loss_fn(self, pred_tf, obs_tf, noise_var, eps=1e-12):
+        """
+        Negative log-likelihood
+          obs_tf:[1,500] tensor cfloat/complex64
+          pred_tf:[1,500] tensor cfloat/complex64
+          noise_var: [1,500] float32             
+        Returns NLL scalar
+        """
+        diff = obs_tf - pred_tf
+        var = noise_var.clamp_min(eps)
+        nll = (diff.abs().pow(2) / var).mean()   # correct
+        return nll
+    
+    def loss_fn_magnitude_only(self, pred_tf, obs_tf):
+        """Only fit magnitudes, ignore phase"""
+        pred_mag = torch.abs(pred_tf)
+        obs_mag = torch.abs(obs_tf)
+        return torch.mean((pred_mag - obs_mag)**2)
+    def loss_fn_smoothed(self, pred_tf, obs_tf, kernel_size=20):
+        """Smooth magnitude spectra before comparing"""
+        pred_mag = torch.abs(pred_tf).flatten()  # Flatten to 1D [F]
+        obs_mag = torch.abs(obs_tf).flatten()    # Flatten to 1D [F]
 
+        # Apply moving average to blur sharp features
+        # conv1d expects [batch, channels, length] = [1, 1, F]
+        kernel = torch.ones(1, 1, kernel_size, device=pred_mag.device) / kernel_size
+        pred_smooth = torch.nn.functional.conv1d(pred_mag.unsqueeze(0).unsqueeze(0), kernel, padding=kernel_size//2).squeeze()
+        obs_smooth = torch.nn.functional.conv1d(obs_mag.unsqueeze(0).unsqueeze(0), kernel, padding=kernel_size//2).squeeze()
 
+        return torch.mean((pred_smooth - obs_smooth)**2)
+    def loss_fn_statistics(self, pred_tf, obs_tf):
+        """Compare statistical properties, not point-by-point"""
+        pred_mag = torch.abs(pred_tf)
+        obs_mag = torch.abs(obs_tf)
+        
+        # Compare mean and variance instead of each frequency
+        loss_mean = (pred_mag.mean() - obs_mag.mean())**2
+        loss_var = (pred_mag.var() - obs_mag.var())**2
+        
+        return loss_mean + loss_var
+    def plot_loss_landscape(self, obs_tf, noise_var, save_path="loss_landscape_ZFim.png"):
+        """
+        Plot loss vs L1 to visualize the optimization landscape.
+        ZF and ZL are fixed to true values.
+        """
+        # Fix ZF and ZL to true values
+        L1 = torch.tensor(250.0, device=self.device, dtype=torch.float32)
+        ReZF = torch.tensor(100.0, device=self.device, dtype=torch.float32)
+        ZL = torch.tensor(100.0 - 5.0j, device=self.device, dtype=torch.cfloat)
+
+        # Sweep L1 from 0 to 1 (normalized)
+        ImZF_normalized = torch.linspace(0.01, 0.99, 199, device=self.device,
+    dtype=torch.float32)
+        ImZF_physical = self.ImZF_min + (self.ImZF_max - self.ImZF_min) * ImZF_normalized
+        losses = []
+
+        with torch.no_grad():
+            for ImZF in ImZF_physical:
+                ZF = torch.complex(ReZF, ImZF)
+                pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
+                loss = self.loss_fn(pred_tf, obs_tf, noise_var)
+                losses.append(loss.item())
+
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(ImZF_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+        plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True ImZF=0.25')
+        plt.xlabel('ImZF (normalized)', fontsize=12)
+        plt.ylabel('Loss (NLL)', fontsize=12)
+        plt.title('Loss Landscape vs Imaginary Part of Fault Impedance ImZF', fontsize=14)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved loss landscape plot to {save_path}")
+
+        # Print some diagnostics
+        min_idx = np.argmin(losses)
+        print(f"\nLoss Landscape Diagnostics:")
+        print(f"Minimum loss at ZF_normalized = {ImZF_normalized[min_idx]:.4f}")
+
+    def predict2(self, obs_tf, noise_var):
+        # First plot the loss landscape to diagnose the problem
+        # self.plot_loss_landscape(obs_tf, noise_var)
+        
+        M, F = obs_tf.shape
+        # Fix ZF and ZL to true 
+        L1 = torch.tensor(250.0, device=self.device, dtype=torch.float32)
+        ImZF = torch.tensor(-50.0, device=self.device, dtype=torch.float32)
+        ZL = torch.tensor(100.0 - 5.0j, device=self.device, dtype=torch.cfloat)
+        dev  = self.device
+
+        # Only optimize ReZF, initialize to sigmoid(0) = 0.5
+        ReZF_init = torch.logit(torch.tensor(0.5))
+        U_raw = torch.nn.Parameter(
+            torch.tensor(ReZF_init, dtype=torch.float32, device=dev)  # Scalar for ReZF only
+        )
+        opt = torch.optim.Adam([U_raw], lr=0.05)
+
+        for i in range(20000):
+            ReZF = _sigmoid_to_range(U_raw, self.ReZF_lo, self.ReZF_hi)  # U_raw is now scalar
+            ZF = torch.complex(ReZF, ImZF)
+            pred_tf = self.fm.compute_H_complex(L1, ZF, ZL) #[1, 500]
+            loss = self.loss_fn(pred_tf, obs_tf, noise_var)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            if i % 500 == 0:
+                ReZF_normalized = torch.sigmoid(U_raw)
+                print(f"step {i} | loss {loss.item():.4f}")
+                print(f"ReZF_normalized (sigmoid)={ReZF_normalized.item():.4f} | True value is 0.025")
+
+    def predict3(self, obs_tf, noise_var):
+        """
+        SVI-based inference for L1 only (ZF, ZL fixed to true values).
+        This tests whether SVI performs any better than MLE on the sharp loss landscape.
+        Uses same setup as sensorspaper3.py but for the simple model.
+        """
+        # Fix ZF and ZL to true values
+        ZF = torch.tensor(100.0 + 50.0j, device=self.device, dtype=torch.cfloat)
+        ZL = torch.tensor(100.0 - 5.0j, device=self.device, dtype=torch.cfloat)
+
+        # Flatten observation for likelihood
+        obs_tf_flat = obs_tf.flatten()  # [F] complex
+        noise_std = torch.sqrt(noise_var.flatten().mean())  # Scalar std
+
+        # Define Pyro model
+        def model(obs):
+            # Prior on L1 (normalized to [0, 1])
+            L1_normalized = pyro.sample("L1", dist.Uniform(0.0, 1.0))
+
+            # Convert to physical value
+            L1_physical = self.L1_lo + (self.L1_hi - self.L1_lo) * L1_normalized
+
+            # Compute predicted TF
+            pred_tf = self.fm.compute_H_complex(L1_physical, ZF, ZL).flatten()  # [F] complex
+
+            # Split into real and imaginary for likelihood
+            pred_real = pred_tf.real
+            pred_imag = pred_tf.imag
+            obs_real = obs.real
+            obs_imag = obs.imag
+
+            # Observe real and imaginary parts
+            pyro.sample("obs_real", dist.Normal(pred_real, noise_std).to_event(1), obs=obs_real)
+            pyro.sample("obs_imag", dist.Normal(pred_imag, noise_std).to_event(1), obs=obs_imag)
+
+        # Use AutoNormal guide (same as sensorspaper3.py)
+        guide = AutoNormal(model, init_scale=0.1)
+
+        # Setup SVI with same lr as sensorspaper3.py
+        pyro.clear_param_store()
+        optimizer = pyro.optim.Adam({"lr": 0.2})
+        svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
+
+        # Run inference
+        num_steps = 500
+        losses = []
+
+        print("\n=== SVI Inference for L1 (simple model) ===")
+        for step in range(num_steps):
+            loss = svi.step(obs_tf_flat)
+            losses.append(loss)
+
+            if step % 50 == 0 or step == num_steps - 1:
+                # Get current posterior mean
+                param_store = pyro.get_param_store()
+                loc = param_store["AutoNormal.locs.L1"].item()
+                scale = param_store["AutoNormal.scales.L1"].item()
+                L1_normalized = torch.sigmoid(torch.tensor(loc)).item()
+                L1_physical = self.L1_lo + (self.L1_hi - self.L1_lo) * L1_normalized
+
+                print(f"Step {step:3d} | ELBO: {loss:.2f} | L1_norm: {L1_normalized:.4f} | L1_phys: {L1_physical:.2f}m | scale: {scale:.4f}")
+
+        # Final result
+        param_store = pyro.get_param_store()
+        loc = param_store["AutoNormal.locs.L1"].item()
+        L1_final = torch.sigmoid(torch.tensor(loc)).item()
+        L1_physical_final = self.L1_lo + (self.L1_hi - self.L1_lo) * L1_final
+
+        print(f"\n=== SVI Result ===")
+        print(f"Final L1 (normalized): {L1_final:.4f}")
+        print(f"Final L1 (physical): {L1_physical_final:.2f}m")
+        print(f"True L1 should be ~250m (normalized 0.25)")
+
+        # Plot ELBO convergence
+        plt.figure(figsize=(8, 5))
+        plt.plot(losses)
+        plt.xlabel("SVI Step")
+        plt.ylabel("ELBO Loss")
+        plt.title("SVI Convergence (Simple Model, L1 only)")
+        plt.grid(True)
+        plt.savefig("svi_simple_model_L1.png", dpi=150)
+        plt.close()
+        print("Saved ELBO plot to svi_simple_model_L1.png")
 
     def predict(self, obs_tf, noise_var):
         """

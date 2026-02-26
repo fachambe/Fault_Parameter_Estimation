@@ -24,7 +24,6 @@ from sklearn.model_selection import RandomizedSearchCV, KFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from scipy.stats import randint, uniform, loguniform
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
@@ -102,7 +101,7 @@ def main(cfg_path="configs/benchmark.yaml"):
 
     
     desired_freqs = torch.linspace(fstart, fend, F, device=device, dtype=pul_freq.dtype)  # [F]
-    
+    freq_range_mhz = desired_freqs/1e6
     # For each desired f, find index of closest pul_freq
     idx = torch.abs(pul_freq.unsqueeze(0) - desired_freqs.unsqueeze(1)).argmin(dim=1)     # [F]
 
@@ -129,26 +128,32 @@ def main(cfg_path="configs/benchmark.yaml"):
         L = 1000.0,
         device = device,
     )
-
-    est2 = OptimizedMLE(
-        fm=fm,
-        likelihood=ComplexGaussianLik(),
-        L = 1000.0,
-        device=device
-    )
-
-    est3 = VIoptimized(
+    est2 = VI(
         fm = fm,
         likelihood=ComplexGaussianLik(),
         L = 1000.0,
         device = device
     )
 
-    est4 = MLRegressor(
-        fm = fm,
-        likelihood=ComplexGaussianLik(),
-        estimator_type = "rfr",
-    )
+    # est2 = OptimizedMLE(
+    #     fm=fm,
+    #     likelihood=ComplexGaussianLik(),
+    #     L = 1000.0,
+    #     device=device
+    # )
+
+    # est3 = VIoptimized(
+    #     fm = fm,
+    #     likelihood=ComplexGaussianLik(),
+    #     L = 1000.0,
+    #     device = device
+    # )
+
+    # est4 = MLRegressor(
+    #     fm = fm,
+    #     likelihood=ComplexGaussianLik(),
+    #     estimator_type = "rfr",
+    # )
 
 
 
@@ -171,61 +176,30 @@ def main(cfg_path="configs/benchmark.yaml"):
                                      force=cfg["force"], desired_freq=pul_freq[idx], estimate=estimate, split="test")
         h_obs = torch.tensor(test["h_obs_real"], device=device) + 1j*torch.tensor(test["h_obs_imag"], device=device)  # [M,F]
         var = torch.tensor(test["noise_var"], device=device)   # [M,F]
+        # plt.figure(figsize=(8,6))
+        # h_obs_1d = h_obs.squeeze()
+        # plt.plot(
+        #     freq_range_mhz.cpu().numpy(),
+        #     20 * torch.log10(torch.abs(h_obs_1d)).cpu().numpy(),
+        #     label=r"$H_{1,1}$ (Model)"
+        # )
 
-        # scaler = StandardScaler()
-        # pca = PCA(n_components=100, random_state=0)
-
-        # X_train_s = scaler.fit_transform(X_train)
-        # X_train_p = pca.fit_transform(X_train_s)
-
+        # plt.xscale("log")
+        # plt.xlabel("Frequency (MHz)", fontsize=12)
+        # plt.ylabel("Magnitude (dB)", fontsize=12)
+        # plt.title(r"$H$ Transfer Function in dB", fontsize=14)
+        # plt.grid(which="both", linestyle="--", linewidth=0.5, alpha=0.7)
+        # plt.legend(fontsize=12)
+        # plt.tight_layout()
+        # plt.show()
+        preds_mle = est1.predict2(h_obs, var)
+        rmse_mle = rmse_joint(preds_mle, test)
+        print("RMSE from MLE", rmse_mle)
         
-        # est.fit(X_train_p, y_train)
-
-        # H_real = test["h_obs_real"]   # [M_test, F]
-        # H_imag = test["h_obs_imag"]   # [M_test, F]
-
-        # H_mag = np.sqrt(H_real**2 + H_imag**2)      # [M_test, F]
-        # eps = 1e-12
-        # X_test = 20.0 * np.log10(H_mag + eps)       # [M_test, F]
-
-        # #X_test = np.stack([test["h_obs_real"], test["h_obs_imag"]], axis=2) #[M_test, F, 2]
-        # #M_test, F, _ = X_test.shape
-        # #X_test_flat = X_test.reshape(M_test, 2 * F) #[M_test, 2F]
-
-        # X_test_s = scaler.transform(X_test)
-        # X_test_p = pca.transform(X_test_s)
-        # # --- predict ---
-        # # y_pred_s = est.model.predict(X_test_flat)       # [N,5] 
-        # # y_pred   = y_scaler.inverse_transform(y_pred_s) # [N,5]
-        # # preds = {
-        # #     "L1":    y_pred[:, 0],
-        # #     "ZF_re": y_pred[:, 1],
-        # #     "ZF_im": y_pred[:, 2],
-        # #     "ZL_re": y_pred[:, 3],
-        # #     "ZL_im": y_pred[:, 4],
-        # # }
-        # preds = est.predict(X_test_p, var)  # [N, 5]
-        # # y_pred = y_scaler.inverse_transform(y_pred_s)
-        # # print("preds", preds)
-        # print("y_pred L1 mean:", preds["L1"].mean())
-        # print("y_pred L1 std:", preds["L1"].std())
-        # print("y_pred ZF Re mean", preds["ZF_re"].mean())
-        # print("y_pred ZF Re std", preds["ZF_re"].std())
-        # print("y_pred ZL Re mean", preds["ZL_re"].mean())
-        # print("y_pred ZL Re std", preds["ZL_re"].std())
-
-        # rmse_MLReg = rmse_joint(preds, test)
-        # print("RMSE from ML Regressors", rmse_MLReg)
-        
-        
-        preds_optimizedmle = est2.predict(h_obs, var)
-        rmse_optimizedmle = rmse_joint(preds_optimizedmle, test)
-        print("RMSE from MLE + L1 NN Profile", rmse_optimizedmle)
-        
-        
-        preds_optimizedelbo = est3.predict(h_obs, var, snr_db)
-        rmse_optimizedelbo = rmse_joint(preds_optimizedelbo, test)
-        print("RMSE from SVI + mu_L1 ELBO Profile", rmse_optimizedelbo)
+        adasd
+        preds_elbo = est2.predict(h_obs, var, snr_db)
+        rmse_elbo = rmse_joint(preds_elbo, test)
+        print("RMSE from SVI", rmse_elbo)
         
         
 

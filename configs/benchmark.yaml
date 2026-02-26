@@ -5,9 +5,9 @@ seed: 5692
 force: True #Force to regenerate dataset
 plot_loglikelihood: False #Plot log-likelihood with respect to parameter of interest at each SNR
 
-snr_dbs: [0]
+snr_dbs: [40]
 
-test_per_snr: 1000
+test_per_snr: 1
 train_per_snr: 5000
 
 freq:
@@ -22,7 +22,7 @@ estimate: None #"real", "imag", or None. Only applies to 1D case.
 
 fixed: 
   L1: 250.0
-  ZF: {re: 100.0, im: 50.0}
+  ZF: {re: 100.0, im: -50.0}
   ZL: {re: 100.0,  im: -5.0}
 
 #Parameter Ranges
