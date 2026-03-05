@@ -83,6 +83,70 @@ def param_labels(target, estimate):
 
 
 
+def plot_gamma_vs_frequency(cfg_path="configs/benchmark.yaml"):
+    """Plot propagation constant gamma vs frequency."""
+    cfg = yaml.safe_load(open(cfg_path))
+    device = torch.device(cfg.get("device", "cpu"))
+
+    # Load from .mat file
+    mat = sio.loadmat("experiments/cable_parameter.mat")
+    gamma_full = torch.tensor(mat["gamma"].squeeze(), dtype=torch.cfloat, device=device)
+    pul_freq = torch.tensor(mat["pulFreq"].squeeze(), dtype=torch.float32, device=device)
+
+    fstart = float(cfg["freq"]["start_hz"])
+    fend = float(cfg["freq"]["stop_hz"])
+    F = int(cfg["freq"]["num_points"])
+
+    desired_freqs = torch.linspace(fstart, fend, F, device=device, dtype=pul_freq.dtype)
+    freq_range_mhz = desired_freqs / 1e6
+
+    # Get gamma at desired frequencies
+    idx = torch.abs(pul_freq.unsqueeze(0) - desired_freqs.unsqueeze(1)).argmin(dim=1)
+    gamma_list = gamma_full[idx]
+
+    # Extract real (attenuation) and imaginary (phase constant) parts
+    alpha = gamma_list.real.cpu().numpy()  # Attenuation constant
+    beta = gamma_list.imag.cpu().numpy()   # Phase constant
+    freq_mhz = freq_range_mhz.cpu().numpy()
+
+    # Create figure with 2 subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Plot attenuation constant (real part)
+    ax1.plot(freq_mhz, alpha, 'b-', linewidth=1.5)
+    ax1.set_xscale('log')
+    ax1.set_xlabel('Frequency (MHz)', fontsize=12)
+    ax1.set_ylabel(r'$\alpha$ (Np/m) - Attenuation', fontsize=12)
+    ax1.set_title(r'Attenuation Constant $\alpha = \Re\{\gamma\}$', fontsize=14)
+    ax1.grid(True, which='both', linestyle='--', alpha=0.5)
+    # Add min/max text box
+    alpha_text = f'Min: {alpha.min():.6f}\nMax: {alpha.max():.6f}'
+    ax1.text(0.95, 0.05, alpha_text, transform=ax1.transAxes, fontsize=10,
+             verticalalignment='bottom', horizontalalignment='right',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # Plot phase constant (imaginary part)
+    ax2.plot(freq_mhz, beta, 'r-', linewidth=1.5)
+    ax2.set_xscale('log')
+    ax2.set_xlabel('Frequency (MHz)', fontsize=12)
+    ax2.set_ylabel(r'$\beta$ (rad/m) - Phase', fontsize=12)
+    ax2.set_title(r'Phase Constant $\beta = \Im\{\gamma\}$', fontsize=14)
+    ax2.grid(True, which='both', linestyle='--', alpha=0.5)
+    # Add min/max text box
+    beta_text = f'Min: {beta.min():.4f}\nMax: {beta.max():.4f}'
+    ax2.text(0.95, 0.05, beta_text, transform=ax2.transAxes, fontsize=10,
+             verticalalignment='bottom', horizontalalignment='right',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.tight_layout()
+    plt.savefig('gamma_vs_frequency.pdf', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    print(f"Frequency range: {freq_mhz[0]:.2f} - {freq_mhz[-1]:.2f} MHz")
+    print(f"Alpha range: {alpha.min():.6f} - {alpha.max():.6f} Np/m")
+    print(f"Beta range: {beta.min():.4f} - {beta.max():.4f} rad/m")
+
+
 def main(cfg_path="configs/benchmark.yaml"):
     start_time = time.perf_counter()
     torch.set_printoptions(precision=8, sci_mode=False)
@@ -93,13 +157,13 @@ def main(cfg_path="configs/benchmark.yaml"):
     mat = sio.loadmat("experiments/cable_parameter.mat")
     gamma_full = torch.tensor(mat["gamma"].squeeze(), dtype=torch.cfloat, device=device)
     Zc_full    = torch.tensor(mat["Z_C"].squeeze(), dtype=torch.cfloat, device=device)
-    pul_freq   = torch.tensor(mat["pulFreq"].squeeze(), dtype=torch.float32, device=device) 
+    pul_freq   = torch.tensor(mat["pulFreq"].squeeze(), dtype=torch.float32, device=device)
 
     fstart = float(cfg["freq"]["start_hz"])
     fend   = float(cfg["freq"]["stop_hz"])
     F      = int(cfg["freq"]["num_points"])
 
-    
+
     desired_freqs = torch.linspace(fstart, fend, F, device=device, dtype=pul_freq.dtype)  # [F]
     freq_range_mhz = desired_freqs/1e6
     # For each desired f, find index of closest pul_freq
@@ -107,7 +171,7 @@ def main(cfg_path="configs/benchmark.yaml"):
 
     gamma_list = gamma_full[idx]   # [F]
     Zc_list    = Zc_full[idx]      # [F]
-    
+
     dm = DatasetManager(device=device)
     fm = ForwardModel(gamma_list, Zc_list, L=1000.0)
 
@@ -135,27 +199,6 @@ def main(cfg_path="configs/benchmark.yaml"):
         device = device
     )
 
-    # est2 = OptimizedMLE(
-    #     fm=fm,
-    #     likelihood=ComplexGaussianLik(),
-    #     L = 1000.0,
-    #     device=device
-    # )
-
-    # est3 = VIoptimized(
-    #     fm = fm,
-    #     likelihood=ComplexGaussianLik(),
-    #     L = 1000.0,
-    #     device = device
-    # )
-
-    # est4 = MLRegressor(
-    #     fm = fm,
-    #     likelihood=ComplexGaussianLik(),
-    #     estimator_type = "rfr",
-    # )
-
-
 
     rmse_curves = {
         #"ML_Regressors": {k: [] for k in["L1", "ZF", "ZL"]},
@@ -176,27 +219,11 @@ def main(cfg_path="configs/benchmark.yaml"):
                                      force=cfg["force"], desired_freq=pul_freq[idx], estimate=estimate, split="test")
         h_obs = torch.tensor(test["h_obs_real"], device=device) + 1j*torch.tensor(test["h_obs_imag"], device=device)  # [M,F]
         var = torch.tensor(test["noise_var"], device=device)   # [M,F]
-        # plt.figure(figsize=(8,6))
-        # h_obs_1d = h_obs.squeeze()
-        # plt.plot(
-        #     freq_range_mhz.cpu().numpy(),
-        #     20 * torch.log10(torch.abs(h_obs_1d)).cpu().numpy(),
-        #     label=r"$H_{1,1}$ (Model)"
-        # )
 
-        # plt.xscale("log")
-        # plt.xlabel("Frequency (MHz)", fontsize=12)
-        # plt.ylabel("Magnitude (dB)", fontsize=12)
-        # plt.title(r"$H$ Transfer Function in dB", fontsize=14)
-        # plt.grid(which="both", linestyle="--", linewidth=0.5, alpha=0.7)
-        # plt.legend(fontsize=12)
-        # plt.tight_layout()
-        # plt.show()
         preds_mle = est1.predict2(h_obs, var)
         rmse_mle = rmse_joint(preds_mle, test)
         print("RMSE from MLE", rmse_mle)
         
-        adasd
         preds_elbo = est2.predict(h_obs, var, snr_db)
         rmse_elbo = rmse_joint(preds_elbo, test)
         print("RMSE from SVI", rmse_elbo)
@@ -308,4 +335,8 @@ def main(cfg_path="configs/benchmark.yaml"):
 
 
 if __name__ == "__main__":
-    main()
+    # Plot gamma vs frequency
+    plot_gamma_vs_frequency()
+
+    # Uncomment to run main benchmarks
+    #main()

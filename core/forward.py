@@ -4,6 +4,7 @@ class ForwardModel:
     def __init__(self, gamma, Zc, L=1000.0, device=None):
         self.gamma = gamma
         self.Zc = Zc
+        self.Zs = 5.0
         self.L = L
         self.device = device
 
@@ -41,6 +42,9 @@ class ForwardModel:
             ZL  = ZL.to(device=dev, dtype=torch.cfloat) #[N]
 
         gamma = self.gamma.unsqueeze(0)  # [1, F]
+        # alpha_orig = gamma.real
+        # beta_orig = gamma.real
+        # gamma = alpha_orig + 1j * (0.1 * beta_orig)
         Zc    = self.Zc.unsqueeze(0)     # [1, F]
         L     = self.L
 
@@ -58,8 +62,13 @@ class ForwardModel:
 
         A1 = torch.cosh(tmp1) + tmp4 * torch.sinh(tmp2) * torch.cosh(tmp3)      # [N,F]
         B1 = Zc * torch.sinh(tmp1) + tmp5 * torch.sinh(tmp2) * torch.sinh(tmp3) # [N,F]
-        H = ZL_nf / (A1 * ZL_nf + B1)                                # [N,F] cfloat
+        C1 = torch.sinh(tmp1)/Zc + torch.cosh(tmp2)*torch.cosh(tmp3)/ZF_nf
+        D1 = torch.cosh(tmp1) + tmp4*torch.sinh(tmp3)*torch.cosh(tmp2)
         
+        H = ZL_nf / (A1 * ZL_nf + B1)
+        #H = ZL_nf / (A1 * ZL_nf + B1 + C1*ZL_nf*self.Zs + D1*self.Zs)   # [N,F] cfloat
+
+
         if(has_batch):
             return H.reshape(*batch, N, F)
         else:

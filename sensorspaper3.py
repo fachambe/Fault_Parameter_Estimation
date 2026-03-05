@@ -2,6 +2,7 @@ import numpy as np
 import random
 import pyro
 import copy
+import math
 import pandas as pd
 from pyro.distributions.transforms import SigmoidTransform, AffineTransform
 from pyro.distributions import TransformedDistribution, constraints
@@ -59,6 +60,43 @@ FIXED_LOAD_TYPES = [
     3,  # load_20 (was load_1)  R1-O3  Motor
     1,  # load_21 (was load_0)  R1-O2  Constant
 ]
+
+def calculate_receiver_load(Z_RG, Z_R1, Z_R2, Z_R3):
+    Z_rec = torch.tensor([
+        [Z_RG + Z_R1, Z_RG, Z_RG],
+        [Z_RG, Z_RG + Z_R2, Z_RG],
+        [Z_RG, Z_RG, Z_RG + Z_R3]
+    ])
+    return Z_rec
+
+# ---- Define Network Constants ----
+num_loads = 22
+num_of_conductors = 4
+
+# Set device FIRST before creating any tensors
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
+print(f"Using device: {device}")
+
+#frequencies = torch.logspace(torch.log10(torch.tensor(2e6)), torch.log10(torch.tensor(10e6)), 500) #2-10MHz
+#frequencies = torch.logspace(torch.log10(torch.tensor(150e3)), torch.log10(torch.tensor(30e6)), 200) #150KHz - 30MHz
+frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
+                              torch.log10(torch.tensor(500e3, device=device)), 200, device=device) #150KHz - 2MHz
+freq_range_mhz = frequencies / 1e6
+omega = 2 * torch.pi * frequencies
+num_freqs = len(omega)
+
+#Transmitter/Receiver Constants
+Z_RG = Z_R1 = Z_R2 = 50.0
+Z_R3 = 50.0
+ZT0 = ZTG1 = ZTG2 = 50.0
+ZTG3 = 50.0
+ZT12 = 100.0
+ZT13 = ZT23 = 100.0
+Z_rec = calculate_receiver_load(Z_RG, Z_R1, Z_R2, Z_R3).to(device)
+Y_rec = torch.linalg.inv(Z_rec)
+Z_rec = Z_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
+Y_rec = Y_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
 
 def calculate_H_nw(Phi_network, n, Z_rec):
     """
@@ -196,6 +234,21 @@ def get_mtl_matrices(R, L, C, G, n, omega):
     # Compute eigenvalues and eigenvectors of YZ
     eigvals, eigvecs = torch.linalg.eig(YZ)  # eigvals: (N, n), eigvecs: (N, n, n)
 
+    # Sort eigenvalues by magnitude to ensure consistent mode ordering across frequencies
+    # This prevents "mode switching" where eigenvalue indices swap as frequency changes
+    # sort_idx = torch.argsort(torch.abs(eigvals), dim=1)  # (N, n) indices sorted by |eigenvalue|
+    # # Gather sorted eigenvalues
+    # eigvals_sorted = torch.gather(eigvals, 1, sort_idx)  # (N, n)
+
+    # # Gather sorted eigenvectors - need to expand sort_idx for the last dimension
+    # # sort_idx_expanded = sort_idx.unsqueeze(-1).expand(-1, -1, n)  # (N, n, n)
+    # # eigvecs_sorted = torch.gather(eigvecs, 1, sort_idx_expanded)  # (N, n, n)
+    # sort_idx_expanded = sort_idx.unsqueeze(1).expand(-1, n, -1)  # (N, n, n) - note unsqueeze(1) not (-1)
+    # eigvecs_sorted = torch.gather(eigvecs, 2, sort_idx_expanded)  # gather along dim=2 (COLUMNS)
+    # # Use sorted values
+    # eigvals = eigvals_sorted
+    # eigvecs = eigvecs_sorted
+
     # Compute gamma as a diagonal matrix with sqrt(eigenvalues)
     gamma = torch.zeros((N, n, n), dtype=torch.complex64, device=R.device)  # Initialize with zeros
     gamma[:, torch.arange(n), torch.arange(n)] = torch.sqrt(eigvals)  # Assign square roots of eigenvalues
@@ -225,12 +278,12 @@ def calculate_cable_parameters(r_w, omega, n):
     """
     f = omega / (2 * torch.pi)  # Convert omega to frequency (Hz)
     num_freqs = len(f)
-    # Constants
-    mu_0 = 4 * torch.pi * 1e-7
+    # Constants (these are Python floats, not tensors)
+    mu_0 = 4 * np.pi * 1e-7
     sigma = 5.8 * 1e7
     epsilon = 3.19 * 1e-11
     dc = 4 * 1e-4 + 3.02 * r_w
-    dc2 = torch.sqrt(torch.tensor(2.0)) * dc
+    dc2 = math.sqrt(2.0) * dc  
     tandelta = 1e-6
     delta = 1 / torch.sqrt(torch.pi * mu_0 * sigma * f)  # Skin depth (tensor of shape (num_freqs,))
     r = torch.where(
@@ -243,17 +296,19 @@ def calculate_cable_parameters(r_w, omega, n):
         torch.stack([r, 2 * r, r], dim=-1),
         torch.stack([r, r, 2 * r], dim=-1)
     ], dim=-2).to(torch.complex64)
-    L = (mu_0 / (2 * torch.pi)) * torch.tensor([
+    # L matrix - dc, dc2, r_w are all Python floats, so np.log works fine
+    L = (mu_0 / (2 * np.pi)) * torch.tensor([
         [2*np.log(dc / r_w), np.log((dc * dc2) / (dc * r_w)), np.log((dc * dc) / (dc2 * r_w))],
         [np.log((dc * dc2) / (dc * r_w)), 2*np.log(dc2 / r_w), np.log((dc2 * dc) / (dc * r_w))],
         [np.log( (dc * dc) / (dc2 * r_w)), np.log((dc2 * dc) / (dc * r_w)), 2*np.log(dc / r_w)]
-    ], dtype=torch.complex64)
+    ], dtype=torch.complex64, device=device)
 
     L_new = L.unsqueeze(0).expand(num_freqs, -1, -1)
-    C = mu_0 * epsilon * torch.linalg.inv(L) 
-    C_new = C.unsqueeze(0).expand(num_freqs, -1, -1) 
-    G_new = torch.zeros((num_freqs, n, n), dtype=torch.complex64)
+    C = mu_0 * epsilon * torch.linalg.inv(L)
+    C_new = C.unsqueeze(0).expand(num_freqs, -1, -1)
+    G_new = torch.zeros((num_freqs, n, n), dtype=torch.complex64, device=device)
     return R, L_new, C_new, G_new
+
 # Function to compute constant impedance admittance matrix (type 1)
 def constant_impedance(R_const, C_leak, omega):
     Z12 = Z13 = Z23 = R_const * torch.ones_like(omega, dtype=torch.complex64)
@@ -297,13 +352,7 @@ def compute_load_admittance_3d(load_params):
         torch.stack([-1/Z13, -1/Z23, 1/ZG3 + 1/Z13 + 1/Z23], dim=-1)
     ], dim=-2)  # Shape: (N, 3, 3)
     return Y_load
-def calculate_receiver_load(Z_RG, Z_R1, Z_R2, Z_R3):
-    Z_rec = torch.tensor([
-        [Z_RG + Z_R1, Z_RG, Z_RG],
-        [Z_RG, Z_RG + Z_R2, Z_RG],
-        [Z_RG, Z_RG, Z_RG + Z_R3]
-    ])
-    return Z_rec
+
 def matrix_cosh(M):
     """
     Computes the matrix hyperbolic cosine using expm: cosh(M) = 0.5 * (exp(M) + exp(-M))
@@ -432,7 +481,7 @@ network_params = {
 }
 def get_total_backbone_length(cable_lengths):
     """Calculate total backbone length L from cable_lengths dict of tensors."""
-    total = torch.tensor(0.0)
+    total = torch.tensor(0.0, device=device)
     for key in BACKBONE_KEYS:
         val = cable_lengths[key]
         total = total + val  # Keep as tensor for gradient flow
@@ -447,25 +496,190 @@ def initialize_random_starts():
         for cable_name, cable_info in network_params["cable_lengths"].items():
             if not cable_info["inferred"]:
                 cable_info["random_init"] = torch.rand(1).item()
-# ---- Define Network Constants ----
-num_loads = 22
-num_of_conductors = 4
-frequencies = torch.logspace(torch.log10(torch.tensor(150e3)), torch.log10(torch.tensor(30e6)), 200) #150KHz - 30MHz
-freq_range_mhz = frequencies / 1e6 
-omega = 2 * torch.pi * frequencies 
-num_freqs = len(omega)
 
-#Transmitter/Receiver Constants
-Z_RG = Z_R1 = Z_R2 = 50.0
-Z_R3 = 50.0
-ZT0 = ZTG1 = ZTG2 = 50.0
-ZTG3 = 50.0
-ZT12 = 100.0
-ZT13 = ZT23 = 100.0
-Z_rec = calculate_receiver_load(Z_RG, Z_R1, Z_R2, Z_R3)
-Y_rec = torch.linalg.inv(Z_rec)
-Z_rec = Z_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
-Y_rec = Y_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
+
+# =============================================================================
+# SIMPLIFIED MTL TRANSFER FUNCTION: Tx - Cable(L1) - Fault - Cable(L-L1) - Rx
+# =============================================================================
+def compute_H_simple_mtl_rho(L1, L_total, Y_fault, Z_load, R, L_mat, C, G, omega_vec, n=3):
+    T, Tinv, gamma, ZC, YC = get_mtl_matrices(R, L_mat, C, G, n, omega) #MTL parameters of wires in service panel
+    
+    L2 = L_total - L1
+    #node0 (Yrec)
+    Y_rec = torch.linalg.inv(Z_load)
+    rho1 = reflection_coefficient(Y_rec, T, Tinv, ZC, YC)
+    h1 = h_B(rho1, ZC, T, Tinv, gamma, L2)
+    Y_reccarried = carry_back_load(rho1, T, YC, gamma, L2)
+    Y_node1 = Y_reccarried + Y_fault
+    rho2 = reflection_coefficient(Y_node1, T, Tinv, ZC, YC)
+    h2 = h_B(rho2, ZC, T, Tinv, gamma, L1)
+    Y_reccarried2 = carry_back_load(rho2, T, YC, gamma, L1)
+    hoverall = h1 @ h2
+    return hoverall
+
+def compute_H_simple_mtl(L1, L_total, Y_fault, Z_load, R, L_mat, C, G, omega_vec, n=3):
+    """
+    Compute simplified MTL transfer function: Tx - Cable(L1) - Fault - Cable(L-L1) - Load
+
+    This mirrors the simple model structure but uses MTL matrices instead of scalars.
+
+    Args:
+        L1: Fault location (distance from Tx), scalar or tensor
+        L_total: Total cable length, scalar
+        Z_fault: Fault impedance matrix (N, n, n) or scalar (will be converted to diagonal)
+        Z_load: Load impedance matrix (N, n, n)
+        R, L_mat, C, G: PUL parameters (N, n, n) tensors
+        omega_vec: Angular frequencies (N,) tensor
+        n: Number of conductors - 1 (default 3)
+
+    Returns:
+        H: Transfer function matrix (N, n, n) complex
+    """
+    N = len(omega_vec)
+    device = R.device
+    L2 = L_total - L1
+
+    # Reshape omega for broadcasting
+    omega = omega_vec.view(-1, 1, 1)
+
+    phinw_L2 = calculate_cable_transmission_matrix(R, L_mat, C, G, L2, omega)
+    # Identity and zero blocks
+    I = np.eye(n, dtype=complex)
+    I = np.repeat(I[None, :, :], N, axis=0)   # (N, n, n)
+
+    # Convert Y_fault to numpy if it's a torch tensor
+    if torch.is_tensor(Y_fault):
+        Y_fault_np = Y_fault.detach().cpu().numpy()
+    else:
+        Y_fault_np = Y_fault
+
+    # Pre-allocate the full (N, 2n, 2n) matrix
+    Phi_fault = np.zeros((N, 2*n, 2*n), dtype=complex)
+
+    # Assign blocks
+    Phi_fault[:, :n, :n] = I            # Top-left: A = I
+    Phi_fault[:, :n, n:] = 0            # Top-right: B = 0  (already zeros)
+    Phi_fault[:, n:, :n] = -Y_fault_np   # Bottom-left: C = -Y_fault
+    Phi_fault[:, n:, n:] = I            # Bottom-right: D = I
+    
+    phinw_L1 = calculate_cable_transmission_matrix(R, L_mat, C, G, L1, omega)
+    Phi_total = phinw_L2 @ Phi_fault @ phinw_L1  # Order: Tx → L1 → fault → L2 → Load
+    H = calculate_H_nw(Phi_total, n, Z_load)
+    return H
+
+
+def plot_nll_vs_L1_simple_mtl(snr_db=40, L1_true=250.0, L_total=1000.0,
+                               save_path="nll_vs_L1_simple_mtl_150-30_100m.pdf"):
+    """
+    Plot NLL vs L1 for the simplified MTL model.
+
+    Uses the same Tx-cable-fault-cable-Rx structure as the simple model but with
+    MTL matrices (3x3) instead of scalars.
+    """
+    # Use global omega and frequency range
+    global omega, frequencies, freq_range_mhz
+    N = len(omega)
+    n = 3  # 3 conductors (4 wires - 1)
+    device = omega.device
+
+    # Cable parameters (using room wire radius)
+    r_w = 0.81e-3  # Wire radius for room cables
+    R, L_mat, C, G = calculate_cable_parameters(r_w, omega, n)
+
+    # Load impedance matrix (100-5.0j on all diagonals)
+    Z_load = (100.0 - 5.0j) * torch.eye(n, dtype=torch.complex64, device=device).unsqueeze(0).expand(N, -1, -1)
+
+    # Fault impedance (scalar, will be diagonalized)
+    Zf = torch.tensor(100.0 - 50.0j, dtype=torch.complex64, device=device)
+
+    Y_fault = torch.zeros((n, n), dtype=torch.complex64, device=device)
+    Y_fault[0, 0] = 1.0 / Zf   # fault on 0th conductor to reference
+    Y_fault = Y_fault.unsqueeze(0).expand(N, -1, -1)
+    
+    H_true1 = compute_H_simple_mtl_rho(
+        L1=L1_true, L_total=L_total, Y_fault=Y_fault,
+        Z_load=Z_load, R=R, L_mat=L_mat, C=C, G=G, omega_vec=omega, n=n
+    )
+
+    # eps = 1e-12
+    # H1_db = 20 * torch.log10(torch.abs(H_true1) + eps)
+    # H2_db = 20 * torch.log10(torch.abs(H_true2) + eps)
+
+    # # --- Extract (0,0) element ---
+    # H1_00 = H1_db[:, 0, 0]
+    # H2_00 = H2_db[:, 0, 0]
+
+    # # --- Move to CPU ---
+    # H1_00_np = H1_00.detach().cpu().numpy()
+    # H2_00_np = H2_00.detach().cpu().numpy()
+
+    # freq_np = freq_range_mhz  # already numpy
+
+    # # --- Plot ---
+    # plt.figure(figsize=(8, 5))
+
+    # plt.plot(freq_np, H1_00_np, label="H_true1 (rho model)", linewidth=2)
+    # plt.plot(freq_np, H2_00_np, '--', label="H_true2 (standard)", linewidth=2)
+
+    # plt.xlabel("Frequency (MHz)")
+    # plt.ylabel("|H₀₀| (dB)")
+    # plt.title("MTL Transfer Function Comparison (Mode 0→0)")
+    # plt.legend()
+    # plt.grid(True)
+
+    # plt.tight_layout()
+    # plt.show()
+    
+    # Use H[0,0] element (first mode to first mode transfer)
+    H_true_00 = H_true1[:, 0, 0]  # (N,) complex
+
+    # Add noise
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    sig_pow = torch.mean(torch.abs(H_true_00) ** 2)
+    var_f = sig_pow / snr_lin
+    std_f = torch.sqrt(var_f / 2)
+    noise = std_f * (torch.randn_like(H_true_00.real) + 1j * torch.randn_like(H_true_00.imag))
+    H_obs = H_true_00 + noise
+
+    # Sweep L1 and compute NLL
+    L1_grid = torch.linspace(0.01, 0.99, 199)
+    nll_values = []
+
+    print(f"Computing NLL vs L1 for simplified MTL model...")
+    print(f"  L_total = {L_total}m, L1_true = {L1_true}m, SNR = {snr_db}dB")
+
+    with torch.no_grad():
+        for L1 in L1_grid:
+            L1_real = denormalize(L1, 0.0, L_total)
+            #print("L1_real", L1_real)
+            H_pred = compute_H_simple_mtl_rho(
+                L1=L1_real.item(), L_total=L_total, Y_fault=Y_fault,
+                Z_load=Z_load, R=R, L_mat=L_mat, C=C, G=G, omega_vec=omega, n=n
+            )
+            H_pred_00 = H_pred[:, 0, 0]
+
+            # NLL = sum of |H_obs - H_pred|^2 / var
+            residual = H_obs - H_pred_00
+            nll = torch.sum(torch.abs(residual) ** 2 / var_f).item()
+            nll_values.append(nll)
+    
+    # Find minimum
+    plt.figure(figsize=(10, 6))
+    plt.plot(L1_grid.cpu().numpy(), nll_values, 'b-', linewidth=2)
+    plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True fault_position=0.25')
+    plt.xlabel('L1 (normalized)', fontsize=12)
+    plt.ylabel('Loss (NLL)', fontsize=12)
+    plt.title('Loss Landscape vs Fault Location L1 (Simple Model with Complex Model Cable Params' \
+    '+ MTL)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved plot to {save_path}")
+    
+
+
  
 def generate_load_parameters_deterministic(num_loads, omega):
     """
@@ -561,7 +775,7 @@ def convert_to_tensors(network_params):
     tensor_params = {}
     for load, params in network_params["loads"].items():
         tensor_params[load] = {
-            key: torch.tensor(val["value"], dtype=torch.complex64) for key, val in params.items()
+            key: torch.tensor(val["value"], dtype=torch.complex64, device=device) for key, val in params.items()
         }
     return tensor_params
 
@@ -627,11 +841,11 @@ def compute_fault_admittance_matrix(Z_fault_real, Z_fault_imag, N, n, k=0):
     #print("Z_fault real dtype", type(Z_fault_real))
     #print("Z_fault real dtype", type(Z_fault_imag))
     # #] Ensure both have the same dtype for torch.complex()
-    Z_fault_real = Z_fault_real.to(torch.float32) if isinstance(Z_fault_real, torch.Tensor) else torch.tensor(Z_fault_real, dtype=torch.float32)
-    Z_fault_imag = Z_fault_imag.to(torch.float32) if isinstance(Z_fault_imag, torch.Tensor) else torch.tensor(Z_fault_imag, dtype=torch.float32)
+    Z_fault_real = Z_fault_real.to(torch.float32) if isinstance(Z_fault_real, torch.Tensor) else torch.tensor(Z_fault_real, dtype=torch.float32, device=device)
+    Z_fault_imag = Z_fault_imag.to(torch.float32) if isinstance(Z_fault_imag, torch.Tensor) else torch.tensor(Z_fault_imag, dtype=torch.float32, device=device)
     Z_fault = torch.complex(Z_fault_real, Z_fault_imag)
     Y_f = 1.0 / Z_fault  # Complex admittance
-    Y_fault = torch.zeros(N, n, n, dtype=torch.complex64)
+    Y_fault = torch.zeros(N, n, n, dtype=torch.complex64, device=device)
     Y_fault[:, k, k] = Y_f
     return Y_fault
 
@@ -651,7 +865,7 @@ def get_fault_segment_and_local_position(fault_position, cable_lengths):
     """
     L = get_total_backbone_length(cable_lengths)
     fault_position_abs = fault_position * L  # Convert to meters
-    cumulative = torch.tensor(0.0)
+    cumulative = torch.tensor(0.0, device=device)
     for idx, key in enumerate(BACKBONE_KEYS):
         seg_len = cable_lengths[key] 
         if (cumulative + seg_len >= fault_position_abs).item() or idx == len(BACKBONE_KEYS) - 1:
@@ -829,6 +1043,7 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     H_nw = H1[:, 0, 0]
     return H_nw
     return H_nw_magnitude_db_1
+
 
 def calculate_Hnw(cable_lengths, sampled_params, fault_params):
     """
@@ -1008,7 +1223,7 @@ def model_no_fault(H1_noisy):
                 norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
                 load_dict[param_name] = denormalize(norm_sample, min_val, max_val)
             else:
-                load_dict[param_name] = torch.tensor(param_info["value"])
+                load_dict[param_name] = torch.tensor(param_info["value"], device=device)
         load_params[load_name] = load_dict
 
     # Sample/fix cable parameters
@@ -1020,7 +1235,7 @@ def model_no_fault(H1_noisy):
             physical_value = denormalize(norm_sample, infer_lo, infer_hi)
             cable_lengths[cable_name] = physical_value
         else:
-            cable_lengths[cable_name] = torch.tensor(cable_info["value"])
+            cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
 
     H1_pred_c = calculate_Hnw_nofault(cable_lengths, load_params).unsqueeze(0).expand(N, -1)
     H1_pred = torch.view_as_real(H1_pred_c)
@@ -1053,7 +1268,7 @@ def model_with_fault(H1_noisy):
                 norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
                 load_dict[param_name] = denormalize(norm_sample, min_val, max_val)
             else:
-                load_dict[param_name] = torch.tensor(param_info["value"])
+                load_dict[param_name] = torch.tensor(param_info["value"], device=device)
         load_params[load_name] = load_dict
 
     # Sample/fix cable parameters
@@ -1065,7 +1280,7 @@ def model_with_fault(H1_noisy):
             physical_value = denormalize(norm_sample, infer_lo, infer_hi)
             cable_lengths[cable_name] = physical_value
         else:
-            cable_lengths[cable_name] = torch.tensor(cable_info["value"])
+            cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
 
     # Sample/fix fault parameters
     fault_params = {}
@@ -1081,11 +1296,11 @@ def model_with_fault(H1_noisy):
         else:
             # Fixed fault parameters (use true values for testing)
             if fault_name == "Z_fault_real":
-                fault_params[fault_name] = torch.tensor(100.0)
+                fault_params[fault_name] = torch.tensor(100.0, device=device)
             elif fault_name == "Z_fault_imag":
-                fault_params[fault_name] = torch.tensor(-50.0)
+                fault_params[fault_name] = torch.tensor(-50.0, device=device)
             else:
-                fault_params[fault_name] = torch.tensor(0.25)
+                fault_params[fault_name] = torch.tensor(0.25, device=device)
 
     # WITH FAULT forward model
     H1_pred_c = calculate_Hnw(cable_lengths, load_params, fault_params).unsqueeze(0).expand(N, -1)
@@ -1120,8 +1335,8 @@ def guide(H1_noisy):
                 continue
 
             full_name = f"{load_name}_{param_name}"
-            loc = pyro.param(f"{full_name}_loc", torch.tensor(0.0))  # std normal
-            scale = pyro.param(f"{full_name}_scale", torch.tensor(0.1), constraint=constraints.positive)
+            loc = pyro.param(f"{full_name}_loc", torch.tensor(0.0, device=device))  # std normal
+            scale = pyro.param(f"{full_name}_scale", torch.tensor(0.1, device=device), constraint=constraints.positive)
 
             q = TransformedDistribution(
                 dist.Normal(loc, scale),
@@ -1133,8 +1348,8 @@ def guide(H1_noisy):
         if not info["inferred"]:
             continue
 
-        loc = pyro.param(f"{key}_loc", torch.tensor(0.0))
-        scale = pyro.param(f"{key}_scale", torch.tensor(0.1), constraint=constraints.positive)
+        loc = pyro.param(f"{key}_loc", torch.tensor(0.0, device=device))
+        scale = pyro.param(f"{key}_scale", torch.tensor(0.1, device=device), constraint=constraints.positive)
 
         q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
         pyro.sample(key, q)
@@ -1142,11 +1357,11 @@ def guide(H1_noisy):
         if not info["inferred"]:
             continue
         if key == "fault_position":
-            loc = pyro.param(f"{key}_loc", torch.logit(torch.tensor(0.5)))
-            scale = pyro.param(f"{key}_scale", torch.tensor(0.1), constraint=constraints.positive)
+            loc = pyro.param(f"{key}_loc", torch.logit(torch.tensor(0.5, device=device)))
+            scale = pyro.param(f"{key}_scale", torch.tensor(0.1, device=device), constraint=constraints.positive)
         else:
-            loc = pyro.param(f"{key}_loc", torch.tensor(0.0))
-            scale = pyro.param(f"{key}_scale", torch.tensor(0.1), constraint=constraints.positive)
+            loc = pyro.param(f"{key}_loc", torch.tensor(0.0, device=device))
+            scale = pyro.param(f"{key}_scale", torch.tensor(0.1, device=device), constraint=constraints.positive)
         q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
         pyro.sample(key, q)
 
@@ -1222,8 +1437,9 @@ def update_network_params_from_posterior(posterior_means):
                 if "range" in param_info:
                     min_val, max_val = param_info["range"]
                     physical_val = denormalize(norm_val, min_val, max_val)
+                    old_val = param_info["value"]
                     param_info["value"] = physical_val
-                    print(f" Updated {full_name}: norm={norm_val:.4f} -> value={physical_val:.6g}")
+                    print(f" Updated {full_name}: old value={normalize(old_val, min_val, max_val):.4f} -> new value={norm_val:.6g}")
                 param_info["inferred"] = False
                 updated_count += 1
 
@@ -1233,10 +1449,11 @@ def update_network_params_from_posterior(posterior_means):
             norm_val = posterior_means[cable_name]
             min_val, max_val = cable_info.get("infer_range", cable_info["range"])
             physical_val = denormalize(norm_val, min_val, max_val)
+            old_val = cable_info["value"]
             cable_info["value"] = physical_val
             cable_info["inferred"] = False
             updated_count += 1
-            print(f" Updated {cable_name}: norm={norm_val:.4f} -> value={physical_val:.4f}")
+            print(f" Updated {cable_name}: old value={normalize(old_val, min_val, max_val):.4f} -> new value={norm_val:.4f}")
 
     print(f"\nUpdated {updated_count} parameters from Stage 1 posterior means.")
 
@@ -1364,7 +1581,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
     optimizer2 = pyro.optim.Adam({"lr": 0.2})
     auto_guide = AutoMultivariateNormal(model)
     auto_guide2 = AutoNormal(model)
-    svi = SVI(model, guide, optimizer2, loss=Trace_ELBO(num_particles=20))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
     top_20_most_sensitive = [
         key.replace(".", "_") + "_loc"
         for key in sorted_keys[:20]
@@ -1440,11 +1657,17 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
     plt.savefig(f"svi_param_convergence_{scenario}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
-    # --------- PRINT FINAL MEANS RANKED BY SENSITIVITY ----------
+    # --------- PRINT FINAL MEANS FOR TOP 20 MOST SENSITIVE ----------
     rows = []
-    print("\n=== Final Posterior Means (normalized), ranked by sensitivity ===")
+    squared_errors = []
+    top_20_keys = sorted_keys[:20]  # Only use top 20 most sensitive
+
+    print("\n=== Final Posterior Means (Top 20 Most Sensitive, normalized) ===")
+    print(f"{'Parameter':30s} | {'q-mean':>8s} | {'true':>8s} | {'error':>10s}")
+    print("-" * 65)
+
     # Custom guide: name_loc
-    for name in sorted_keys:
+    for name in top_20_keys:
         pyro_loc_key = name.replace(".", "_") + "_loc"
         if pyro_loc_key not in param_history:
             print(f"{name:30s} | q-mean = N/A")
@@ -1452,16 +1675,37 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
         raw_loc = param_history[pyro_loc_key][-1]
         q_mean = torch.sigmoid(raw_loc).item()
 
-        print(f"{name:30s} | q-mean = {q_mean:.4f}")
+        # Get true value (normalized) from network_params
+        if pyro_loc_key == "Z_fault_real_loc":
+            true_normalized = 0.025
+        else:
+            true_normalized = 0.25
+
+        error = q_mean - true_normalized
+        squared_errors.append(error ** 2)
+        print(f"{name:30s} | {q_mean:8.4f} | {true_normalized:8.4f} | {error:+10.4f}")
         rows.append({
             "parameter": name,
             "q_mean_normalized": q_mean,
+            "true_normalized": true_normalized,
+            "error": error,
         })
 
-    # Save to CSV (moved outside loop)
+    # Compute and print RMSE for top 20
+    if squared_errors:
+        rmse = np.sqrt(np.mean(squared_errors))
+        print("-" * 65)
+        print(f"{'RMSE (top 20, normalized)':30s} | {rmse:.6f}")
+        print(f"Number of parameters: {len(squared_errors)}")
+
+    # Save to CSV with RMSE as separate column (scalar in first row only)
     if rows:
         df = pd.DataFrame(rows)
+        df["rmse_top20"] = np.nan
+        if squared_errors:
+            df.loc[0, "rmse_top20"] = rmse
         df.to_csv(f"posterior_means_{scenario}.csv", index=False)
+        print(f"\nSaved to posterior_means_{scenario}.csv")
 
 def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, threshold, scenario):
     if scenario == "with_fault":
@@ -1482,7 +1726,7 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
 
             for val in values:
                 perturbed_loads = copy.deepcopy(load_params)
-                perturbed_loads[load_name][param_name] = torch.tensor(val)
+                perturbed_loads[load_name][param_name] = torch.tensor(val, device=device)
                 if scenario == "with_fault":
                     H_var = calculate_Hnw(cable_lengths, perturbed_loads, fault_params)
                 else:
@@ -1599,9 +1843,9 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
                     loc = param_history[pyro_key][-1]
                     scale = param_history[f"{load_name}_{param_name}_scale"][-1]
                     z = torch.normal(mean=loc, std=scale)
-                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi))
+                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi), device=device)
                 else:
-                    sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"])
+                    sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"], device=device)
 
         for cable_name, cable_info in network_params["cable_lengths"].items():
             pyro_key = f"{cable_name}_loc"
@@ -1610,9 +1854,9 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
                 loc = param_history[pyro_key][-1]
                 scale = param_history[f"{cable_name}_scale"][-1]
                 z = torch.normal(mean=loc, std=scale)
-                sampled_cable_lengths[cable_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi))
+                sampled_cable_lengths[cable_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi), device=device)
             else:
-                sampled_cable_lengths[cable_name] = torch.tensor(cable_info["value"])
+                sampled_cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
 
         if scenario == "with_fault":
             for fault_name, fault_info in network_params["fault_parameters"].items():
@@ -1622,9 +1866,9 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
                     loc = param_history[pyro_key][-1]
                     scale = param_history[f"{fault_name}_scale"][-1]
                     z = torch.normal(mean=loc, std=scale)
-                    sampled_fault_params[fault_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi))
+                    sampled_fault_params[fault_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi), device=device)
                 else:
-                    sampled_fault_params[fault_name] = torch.tensor(fault_info["value"])
+                    sampled_fault_params[fault_name] = torch.tensor(fault_info["value"], device=device)
                     
         # Compute TF with sampled parameters
         if scenario == "with_fault":
@@ -1661,6 +1905,182 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
     return tf_mean, tf_lower, tf_upper
 
 
+def plot_gamma_vs_frequency_complex():
+    """
+    Plot propagation constant gamma vs frequency for the complex MTL model.
+
+    In MTL theory with modal decomposition, gamma is a diagonal matrix where each
+    diagonal entry represents the propagation constant for that mode.
+    For a 3-conductor system (n=3), we have 3 modes.
+
+    Creates 6 subplots: alpha (attenuation) and beta (phase constant) for each mode.
+    """
+    # Get cable parameters
+    r_w = 0.8128e-3  # Wire radius (same as used in calculate_cable_parameters)
+    n = num_of_conductors - 1  # n = 3
+
+    R, L, C, G = calculate_cable_parameters(r_w, omega, n)
+
+    # Get MTL matrices including gamma
+    _, _, gamma, _, _ = get_mtl_matrices(R, L, C, G, n, omega)
+
+    # Extract diagonal entries for each mode
+    # gamma has shape (num_freqs, n, n), diagonal entries are the modal propagation constants
+    gamma_mode0 = gamma[:, 0, 0]  # Mode 0
+    gamma_mode1 = gamma[:, 1, 1]  # Mode 1
+    gamma_mode2 = gamma[:, 2, 2]  # Mode 2
+
+    # Extract alpha (real) and beta (imag) for each mode
+    alpha0 = gamma_mode0.real.cpu().numpy()
+    beta0 = gamma_mode0.imag.cpu().numpy()
+    alpha1 = gamma_mode1.real.cpu().numpy()
+    beta1 = gamma_mode1.imag.cpu().numpy()
+    alpha2 = gamma_mode2.real.cpu().numpy()
+    beta2 = gamma_mode2.imag.cpu().numpy()
+
+    freq_mhz = freq_range_mhz.cpu().numpy()
+
+    # Create figure with 6 subplots (3 rows x 2 columns)
+    _, axes = plt.subplots(3, 2, figsize=(14, 12))
+
+    mode_data = [
+        (alpha0, beta0, 'Mode 0', 'b'),
+        (alpha1, beta1, 'Mode 1', 'r'),
+        (alpha2, beta2, 'Mode 2', 'g'),
+    ]
+
+    for i, (alpha, beta, mode_name, color) in enumerate(mode_data):
+        # Plot alpha (attenuation) - left column
+        ax_alpha = axes[i, 0]
+        ax_alpha.plot(freq_mhz, alpha, f'{color}-', linewidth=1.5)
+        ax_alpha.set_xscale('log')
+        ax_alpha.set_xlabel('Frequency (MHz)', fontsize=11)
+        ax_alpha.set_ylabel(r'$\alpha$ (Np/m)', fontsize=11)
+        ax_alpha.set_title(fr'{mode_name}: Attenuation $\alpha = \Re\{{\gamma_{{{i},{i}}}\}}$', fontsize=12)
+        ax_alpha.grid(True, which='both', linestyle='--', alpha=0.5)
+        # Add min/max text box
+        alpha_text = f'Min: {alpha.min():.6f}\nMax: {alpha.max():.6f}'
+        ax_alpha.text(0.95, 0.05, alpha_text, transform=ax_alpha.transAxes, fontsize=9,
+                      verticalalignment='bottom', horizontalalignment='right',
+                      bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        # Plot beta (phase constant) - right column
+        ax_beta = axes[i, 1]
+        ax_beta.plot(freq_mhz, beta, f'{color}-', linewidth=1.5)
+        ax_beta.set_xscale('log')
+        ax_beta.set_xlabel('Frequency (MHz)', fontsize=11)
+        ax_beta.set_ylabel(r'$\beta$ (rad/m)', fontsize=11)
+        ax_beta.set_title(fr'{mode_name}: Phase Constant $\beta = \Im\{{\gamma_{{{i},{i}}}\}}$', fontsize=12)
+        ax_beta.grid(True, which='both', linestyle='--', alpha=0.5)
+        # Add min/max text box
+        beta_text = f'Min: {beta.min():.4f}\nMax: {beta.max():.4f}'
+        ax_beta.text(0.95, 0.05, beta_text, transform=ax_beta.transAxes, fontsize=9,
+                     verticalalignment='bottom', horizontalalignment='right',
+                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    plt.suptitle(r'MTL Propagation Constants $\gamma$ vs Frequency (Modal Decomposition)', fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.savefig('gamma_vs_frequency_mtl_oldfreqrange.pdf', dpi=300, bbox_inches='tight')
+    plt.show()
+
+    print(f"\nFrequency range: {freq_mhz[0]:.4f} - {freq_mhz[-1]:.2f} MHz")
+    for i, (alpha, beta, mode_name, _) in enumerate(mode_data):
+        print(f"{mode_name} - Alpha: [{alpha.min():.6f}, {alpha.max():.6f}] Np/m, "
+              f"Beta: [{beta.min():.4f}, {beta.max():.4f}] rad/m")
+
+
+def plot_nll_vs_ReZF_complex_mtl(cable_lengths, load_params, fault_params, snr_db, save_path="nll_vs_ReZF_complex_mtl_150-10.pdf"):
+    """
+    Plot Z_fault_real (ReZF) vs NLL.
+    """
+    print("snr db", snr_db)
+    obs_tf_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    sigpow_s2 = torch.mean(torch.abs(obs_tf_clean)**2)
+    var_f_s2 = sigpow_s2 / snr_lin
+    std_f_s2 = torch.sqrt(var_f_s2 / 2)
+
+    obs_tf_noisy = obs_tf_clean + std_f_s2 * torch.randn_like(obs_tf_clean.real) + \
+                  1j * std_f_s2 * torch.randn_like(obs_tf_clean.imag)
+
+    # Sweep ReZF normalized from 0 to 1, then denormalize to physical range
+    ReZF_min, ReZF_max = 1.0, 4000.0
+    ReZF_normalized = torch.linspace(0.01, 0.99, 200, dtype=torch.float32)
+    losses = []
+    original_ReZF = fault_params["Z_fault_real"]  # Save original value
+
+    with torch.no_grad():
+        for ReZF_norm in ReZF_normalized:
+            # Denormalize to physical value
+            ReZF_physical = ReZF_min + ReZF_norm * (ReZF_max - ReZF_min)
+            fault_params["Z_fault_real"] = ReZF_physical
+            pred_tf = calculate_Hnw(cable_lengths, load_params, fault_params)
+            diff = obs_tf_noisy - pred_tf
+            nll = (diff.abs().pow(2) / var_f_s2).sum()
+            losses.append(nll.item())
+    fault_params["Z_fault_real"] = original_ReZF  # Restore original value
+
+    # Get true normalized value for plotting
+    true_ReZF = original_ReZF.item() if torch.is_tensor(original_ReZF) else original_ReZF
+    true_ReZF_normalized = (true_ReZF - ReZF_min) / (ReZF_max - ReZF_min)
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(ReZF_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+    plt.axvline(x=true_ReZF_normalized, color='r', linestyle='--', linewidth=2,
+                label=f'True ReZF={true_ReZF:.1f}Ω (norm={true_ReZF_normalized:.3f})')
+    plt.xlabel('Re{Z_fault} (normalized)', fontsize=12)
+    plt.ylabel('Loss (NLL)', fontsize=12)
+    plt.title('Loss Landscape vs Fault Impedance Real Part (Complex Model)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved loss landscape plot to {save_path}")
+
+
+def plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, snr_db, save_path="nll_vs_L1_complex_mtl_150-2df"):
+    """
+    plot fault_position vs NLL.
+    """
+    print("snr db", snr_db)
+    obs_tf_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    sigpow_s2 = torch.mean(torch.abs(obs_tf_clean)**2)
+    var_f_s2 = sigpow_s2 / snr_lin #scalar
+    std_f_s2 = torch.sqrt(var_f_s2 / 2)
+
+    obs_tf_noisy = obs_tf_clean + std_f_s2 * torch.randn_like(obs_tf_clean.real) + \
+                  1j * std_f_s2 * torch.randn_like(obs_tf_clean.imag)
+
+    # Sweep L1 from 0 to 1 (normalized)
+    L1_normalized = torch.linspace(0.01, 0.99, 199, dtype=torch.float32)
+    losses = []
+    original_fault_position = fault_params["fault_position"]  # Save original value
+    with torch.no_grad():
+        for L1 in L1_normalized:
+            #fault_params["fault_position"] = denormalize(L1, min_val, max_val)
+            fault_params["fault_position"] = L1
+            pred_tf = calculate_Hnw(cable_lengths, load_params, fault_params)
+            diff = obs_tf_noisy - pred_tf
+            nll = (diff.abs().pow(2) / var_f_s2).sum()   # correct
+            losses.append(nll.item())
+    fault_params["fault_position"] = original_fault_position  # Restore original value
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(L1_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+    plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True fault_position=0.25')
+    plt.xlabel('L1 (normalized)', fontsize=12)
+    plt.ylabel('Loss (NLL)', fontsize=12)
+    plt.title('Loss Landscape vs Fault Location L1 (Complex Model)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved loss landscape plot to {save_path}")
 
 if __name__ == '__main__':
     start_time = time.time()
@@ -1674,22 +2094,77 @@ if __name__ == '__main__':
     print(f"Total number of fault parameters: {num_fault_params}")
     print(f"Total number of network parameters: {total_params + num_cable_params + num_fault_params}")
     print(f"Load type distribution: {load_types}")
+    # Turn off inference for ALL parameters except fault_position
+    # for load_name, params in network_params["loads"].items():
+    #     for param_name in params:
+    #         network_params["loads"][load_name][param_name]["inferred"] = False
+    # for cable_name in network_params["cable_lengths"]:
+    #     network_params["cable_lengths"][cable_name]["inferred"] = False
+    # network_params["fault_parameters"]["fault_position"]["inferred"] = True
+    # network_params["fault_parameters"]["Z_fault_real"]["inferred"] = False
+    # network_params["fault_parameters"]["Z_fault_imag"]["inferred"] = False
+    # print("\n[CONFIG] Only inferring fault_position (all other params fixed)")
 
-    # Convert from network_params to dict of tensors
+    #plot_gamma_vs_frequency_complex()
+    
+    #plot_nll_vs_L1_simple_mtl(snr_db=40, L1_true=25.0, L_total=100.0)
+    # Convert from network_params to dict of tensors (on correct device)
     cable_lengths = {
-        key: torch.tensor(val["value"]) for key, val in network_params["cable_lengths"].items()
+        key: torch.tensor(val["value"], device=device) for key, val in network_params["cable_lengths"].items()
     }
+
     load_params = {
         load_name: {
-            param_name: torch.tensor(param_info["value"])
+            param_name: torch.tensor(param_info["value"], device=device)
             for param_name, param_info in params.items()
         }
         for load_name, params in network_params["loads"].items()
     }
     fault_params = {
-        key: torch.tensor(val["value"]) for key, val in network_params["fault_parameters"].items()
+        key: torch.tensor(val["value"], device=device) for key, val in network_params["fault_parameters"].items()
     }
+    #plot_nll_vs_ReZF_complex_mtl(cable_lengths, load_params, fault_params, 40)
+    
+    #plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, 40)
+    #rwrwr
 
+    # sorted_keys = ["fault_position"]
+    # num_obs = 1
+
+
+    # H1_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+
+    # # Add noise
+    # snr_db = 40
+    # snr_lin = 10.0 ** (snr_db / 10.0)
+    # sigpow = torch.mean(torch.abs(H1_clean)**2)
+    # var_f = sigpow / snr_lin
+    # std_f = torch.sqrt(var_f / 2)
+
+    # H1_noisy_c = H1_clean + std_f * torch.randn_like(H1_clean.real) + \
+    #                 1j * std_f * torch.randn_like(H1_clean.imag)
+    # H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
+    # H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
+
+    # current_model = model_with_fault
+
+    # # Run SVI inference
+    # losses, param_history = run_inference(H1_noisy, current_model, guide, sorted_keys, num_steps=1000)
+
+
+    # selected_s1, sorted_keys_s1 = perform_load_sensitivity_analysis(
+    #     load_params, fault_params, cable_lengths,
+    #     threshold=0.0, scenario="no_fault"
+    # )
+    
+
+
+
+
+
+
+
+    
     # ========================================================================
     # RUN INFERENCE BASED ON SCENARIO
     # ========================================================================
@@ -1707,8 +2182,8 @@ if __name__ == '__main__':
             fault_params=fault_params,
             omega=omega,
             snr_db=40,
-            num_steps_stage1=500,
-            num_steps_stage2=500,
+            num_steps_stage1=100,
+            num_steps_stage2=100,
             threshold=0.0
         )
         losses_s1, param_history_s1, sorted_keys_s1 = stage1_results
@@ -1721,7 +2196,7 @@ if __name__ == '__main__':
         # Run sensitivity analysis
         selected, sorted_keys = perform_load_sensitivity_analysis(
             load_params, fault_params, cable_lengths,
-            threshold=0.015, scenario=SCENARIO
+            threshold=0.0, scenario=SCENARIO
         )
 
         num_obs = 1

@@ -157,7 +157,7 @@ class VanillaAdam(Estimator):
         """
         diff = obs_tf - pred_tf
         var = noise_var.clamp_min(eps)
-        nll = (diff.abs().pow(2) / var).mean()   # correct
+        nll = (diff.abs().pow(2) / var).sum()   # correct
         return nll
     
     def loss_fn_magnitude_only(self, pred_tf, obs_tf):
@@ -187,36 +187,35 @@ class VanillaAdam(Estimator):
         loss_var = (pred_mag.var() - obs_mag.var())**2
         
         return loss_mean + loss_var
-    def plot_loss_landscape(self, obs_tf, noise_var, save_path="loss_landscape_ZFim.png"):
+    def plot_loss_landscape(self, obs_tf, noise_var, save_path="loss_landscape_L1.png"):
         """
         Plot loss vs L1 to visualize the optimization landscape.
         ZF and ZL are fixed to true values.
         """
         # Fix ZF and ZL to true values
-        L1 = torch.tensor(250.0, device=self.device, dtype=torch.float32)
-        ReZF = torch.tensor(100.0, device=self.device, dtype=torch.float32)
+        # L1 = torch.tensor(250.0, device=self.device, dtype=torch.float32)
+        ZF = torch.tensor(100.0 - 50.0j, device=self.device, dtype=torch.cfloat)
         ZL = torch.tensor(100.0 - 5.0j, device=self.device, dtype=torch.cfloat)
 
         # Sweep L1 from 0 to 1 (normalized)
-        ImZF_normalized = torch.linspace(0.01, 0.99, 199, device=self.device,
+        L1_normalized = torch.linspace(0.01, 0.99, 199, device=self.device,
     dtype=torch.float32)
-        ImZF_physical = self.ImZF_min + (self.ImZF_max - self.ImZF_min) * ImZF_normalized
+        L1_physical = self.L1_lo + (self.L1_hi - self.L1_lo) * L1_normalized
         losses = []
 
         with torch.no_grad():
-            for ImZF in ImZF_physical:
-                ZF = torch.complex(ReZF, ImZF)
+            for L1 in L1_physical:
                 pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
                 loss = self.loss_fn(pred_tf, obs_tf, noise_var)
                 losses.append(loss.item())
 
         # Plot
         plt.figure(figsize=(10, 6))
-        plt.plot(ImZF_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
-        plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True ImZF=0.25')
-        plt.xlabel('ImZF (normalized)', fontsize=12)
+        plt.plot(L1_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+        plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True L1=0.25')
+        plt.xlabel('L1 (normalized)', fontsize=12)
         plt.ylabel('Loss (NLL)', fontsize=12)
-        plt.title('Loss Landscape vs Imaginary Part of Fault Impedance ImZF', fontsize=14)
+        plt.title('Loss Landscape vs Fault Location L1', fontsize=14)
         plt.grid(True, alpha=0.3)
         plt.legend()
         plt.tight_layout()
@@ -224,42 +223,225 @@ class VanillaAdam(Estimator):
         plt.close()
         print(f"Saved loss landscape plot to {save_path}")
 
-        # Print some diagnostics
-        min_idx = np.argmin(losses)
-        print(f"\nLoss Landscape Diagnostics:")
-        print(f"Minimum loss at ZF_normalized = {ImZF_normalized[min_idx]:.4f}")
+    def analyze_gamma_impact_on_loss(self, obs_tf, noise_var, L1_true=250.0,
+                                      snr_db=40, save_path="gamma_impact_loss_landscape.png"):
+        """
+        Analyze how gamma (propagation constant) affects the NLL vs L1 loss landscape.
+
+        For each gamma scaling, we REGENERATE the observation at true L1 using that gamma,
+        then sweep L1 to see the loss landscape. This correctly shows how gamma affects
+        the identifiability of L1.
+
+        Args:
+            obs_tf: [M, F] complex observation tensor (unused, kept for API compatibility)
+            noise_var: [M, F] noise variance tensor (unused, we compute our own)
+            L1_true: True fault location in meters
+            snr_db: SNR for generating observations
+            save_path: Where to save the figure
+        """
+        # Fix ZF and ZL to true values
+        ZF = torch.tensor(100.0 - 50.0j, device=self.device, dtype=torch.cfloat)
+        ZL = torch.tensor(100.0 - 5.0j, device=self.device, dtype=torch.cfloat)
+        L1_true_tensor = torch.tensor(L1_true, device=self.device, dtype=torch.float32)
+
+        # Store original gamma
+        gamma_orig = self.fm.gamma.clone()
+        alpha_orig = gamma_orig.real.clone()
+        beta_orig = gamma_orig.imag.clone()
+
+        # L1 grid for loss landscape
+        L1_normalized = torch.linspace(0.01, 0.99, 199, device=self.device, dtype=torch.float32)
+        L1_physical = self.L1_lo + (self.L1_hi - self.L1_lo) * L1_normalized
+        L1_true_normalized = (L1_true - self.L1_lo) / (self.L1_hi - self.L1_lo)
+
+        # Scaling factors to test
+        alpha_scales = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0]
+        beta_scales = [0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0]
+
+        # Create figure with 2 rows x 7 columns
+        fig, axes = plt.subplots(2, 7, figsize=(24, 8))
+
+        # Row 1: Vary alpha (attenuation), keep beta fixed
+        for i, alpha_scale in enumerate(alpha_scales):
+            # Modify gamma: scale alpha, keep beta
+            self.fm.gamma = (alpha_scale * alpha_orig) + 1j * beta_orig
+
+            # Generate observation at TRUE L1 with THIS gamma
+            with torch.no_grad():
+                H_true = self.fm.compute_H_complex(L1_true_tensor, ZF, ZL)  # [1, F]
+                # Add noise
+                sig_pow = torch.mean(torch.abs(H_true) ** 2)
+                var_f = sig_pow / (10 ** (snr_db / 10))
+                std_f = torch.sqrt(var_f / 2)
+                noise = std_f * (torch.randn_like(H_true.real) + 1j * torch.randn_like(H_true.imag))
+                obs_tf_local = H_true + noise
+
+            # Now sweep L1 and compute NLL
+            losses = []
+            with torch.no_grad():
+                for L1 in L1_physical:
+                    pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
+                    loss = self.loss_fn(pred_tf, obs_tf_local, var_f.expand_as(pred_tf))
+                    losses.append(loss.item())
+
+            ax = axes[0, i]
+            ax.plot(L1_normalized.cpu().numpy(), losses, 'b-', linewidth=1.5)
+            ax.axvline(x=L1_true_normalized, color='r', linestyle='--', linewidth=1.5, label='True L1')
+            ax.set_xlabel('L1 (normalized)', fontsize=10)
+            ax.set_ylabel('NLL', fontsize=10)
+            ax.set_title(fr'$\alpha \times {alpha_scale}$', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+            # Add min loss info
+            min_idx = np.argmin(losses)
+            min_L1 = L1_normalized[min_idx].item()
+            ax.axvline(x=min_L1, color='g', linestyle=':', linewidth=1, alpha=0.7)
+            ax.text(0.05, 0.95, f'Min at L1={min_L1:.2f}', transform=ax.transAxes,
+                    fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        # Row 2: Vary beta (phase constant), keep alpha fixed
+        for i, beta_scale in enumerate(beta_scales):
+            # Modify gamma: keep alpha, scale beta
+            self.fm.gamma = alpha_orig + 1j * (beta_scale * beta_orig)
+
+            # Generate observation at TRUE L1 with THIS gamma
+            with torch.no_grad():
+                H_true = self.fm.compute_H_complex(L1_true_tensor, ZF, ZL)
+                sig_pow = torch.mean(torch.abs(H_true) ** 2)
+                var_f = sig_pow / (10 ** (snr_db / 10))
+                std_f = torch.sqrt(var_f / 2)
+                noise = std_f * (torch.randn_like(H_true.real) + 1j * torch.randn_like(H_true.imag))
+                obs_tf_local = H_true + noise
+
+            losses = []
+            with torch.no_grad():
+                for L1 in L1_physical:
+                    pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
+                    loss = self.loss_fn(pred_tf, obs_tf_local, var_f.expand_as(pred_tf))
+                    losses.append(loss.item())
+
+            ax = axes[1, i]
+            ax.plot(L1_normalized.cpu().numpy(), losses, 'r-', linewidth=1.5)
+            ax.axvline(x=L1_true_normalized, color='b', linestyle='--', linewidth=1.5, label='True L1')
+            ax.set_xlabel('L1 (normalized)', fontsize=10)
+            ax.set_ylabel('NLL', fontsize=10)
+            ax.set_title(fr'$\beta \times {beta_scale}$', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+            # Add min loss info
+            min_idx = np.argmin(losses)
+            min_L1 = L1_normalized[min_idx].item()
+            ax.axvline(x=min_L1, color='g', linestyle=':', linewidth=1, alpha=0.7)
+            ax.text(0.05, 0.95, f'Min at L1={min_L1:.2f}', transform=ax.transAxes,
+                    fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        # Restore original gamma
+        self.fm.gamma = gamma_orig
+
+        # Add row labels
+        fig.text(0.02, 0.75, 'Attenuation\n(α scaling)', fontsize=12, fontweight='bold',
+                 ha='center', va='center', rotation=90)
+        fig.text(0.02, 0.25, 'Phase\n(β scaling)', fontsize=12, fontweight='bold',
+                 ha='center', va='center', rotation=90)
+
+        plt.suptitle(r'Impact of $\gamma = \alpha + j\beta$ on NLL vs L1 Loss Landscape (SNR={}dB)'.format(snr_db),
+                     fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout(rect=[0.03, 0, 1, 1])
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.close()
+
+        print(f"Saved gamma impact analysis to {save_path}")
+
+        # Also print some statistics about original gamma
+        print(f"\nOriginal gamma statistics:")
+        print(f"  Alpha (attenuation): min={alpha_orig.min().item():.6f}, max={alpha_orig.max().item():.6f}")
+        print(f"  Beta (phase):        min={beta_orig.min().item():.4f}, max={beta_orig.max().item():.4f}")
+
+        # Row 3: Vary both alpha and beta together (same scaling factor)
+        fig2, axes2 = plt.subplots(1, 7, figsize=(24, 4))
+
+        for i, scale in enumerate(alpha_scales):
+            # Modify gamma: scale both alpha and beta by the same factor
+            self.fm.gamma = (scale * alpha_orig) + 1j * (scale * beta_orig)
+
+            # Generate observation at TRUE L1 with THIS gamma
+            with torch.no_grad():
+                H_true = self.fm.compute_H_complex(L1_true_tensor, ZF, ZL)
+                sig_pow = torch.mean(torch.abs(H_true) ** 2)
+                var_f = sig_pow / (10 ** (snr_db / 10))
+                std_f = torch.sqrt(var_f / 2)
+                noise = std_f * (torch.randn_like(H_true.real) + 1j * torch.randn_like(H_true.imag))
+                obs_tf_local = H_true + noise
+
+            losses = []
+            with torch.no_grad():
+                for L1 in L1_physical:
+                    pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
+                    loss = self.loss_fn(pred_tf, obs_tf_local, var_f.expand_as(pred_tf))
+                    losses.append(loss.item())
+
+            ax = axes2[i]
+            ax.plot(L1_normalized.cpu().numpy(), losses, 'purple', linewidth=1.5)
+            ax.axvline(x=L1_true_normalized, color='r', linestyle='--', linewidth=1.5, label='True L1')
+            ax.set_xlabel('L1 (normalized)', fontsize=10)
+            ax.set_ylabel('NLL', fontsize=10)
+            ax.set_title(fr'$\gamma \times {scale}$', fontsize=12)
+            ax.grid(True, alpha=0.3)
+
+            # Add min loss info
+            min_idx = np.argmin(losses)
+            min_L1 = L1_normalized[min_idx].item()
+            ax.axvline(x=min_L1, color='g', linestyle=':', linewidth=1, alpha=0.7)
+            ax.text(0.05, 0.95, f'Min at L1={min_L1:.2f}', transform=ax.transAxes,
+                    fontsize=8, verticalalignment='top',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+        # Restore original gamma
+        self.fm.gamma = gamma_orig
+
+        plt.suptitle(r'Impact of scaling full $\gamma = \alpha + j\beta$ on NLL vs L1 (SNR={}dB)'.format(snr_db),
+                     fontsize=14, fontweight='bold', y=1.02)
+        plt.tight_layout()
+        plt.savefig("gamma_both_scaled_loss_landscape.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved gamma (both scaled) analysis to gamma_both_scaled_loss_landscape.png")
+
 
     def predict2(self, obs_tf, noise_var):
         # First plot the loss landscape to diagnose the problem
-        # self.plot_loss_landscape(obs_tf, noise_var)
-        
+        print("this runs?")
+        self.plot_loss_landscape(obs_tf, noise_var)
+        # Analyze gamma's impact on the loss landscape
+        self.analyze_gamma_impact_on_loss(obs_tf, noise_var, L1_true=250.0)
+        sdfsf
         M, F = obs_tf.shape
         # Fix ZF and ZL to true 
-        L1 = torch.tensor(250.0, device=self.device, dtype=torch.float32)
-        ImZF = torch.tensor(-50.0, device=self.device, dtype=torch.float32)
+        # L1 = torch.tensor(250.0, device=self.device, dtype=torch.float32)
+        ZF = torch.tensor(100.0 - 50.0j, device=self.device, dtype=torch.cfloat)
         ZL = torch.tensor(100.0 - 5.0j, device=self.device, dtype=torch.cfloat)
         dev  = self.device
 
-        # Only optimize ReZF, initialize to sigmoid(0) = 0.5
-        ReZF_init = torch.logit(torch.tensor(0.5))
+        # Only optimize L1, initialize to sigmoid(0) = 0.5
+        L1_init = torch.logit(torch.tensor(0.5))
         U_raw = torch.nn.Parameter(
-            torch.tensor(ReZF_init, dtype=torch.float32, device=dev)  # Scalar for ReZF only
+            torch.tensor(L1_init, dtype=torch.float32, device=dev)  # Scalar for ReZF only
         )
         opt = torch.optim.Adam([U_raw], lr=0.05)
 
         for i in range(20000):
-            ReZF = _sigmoid_to_range(U_raw, self.ReZF_lo, self.ReZF_hi)  # U_raw is now scalar
-            ZF = torch.complex(ReZF, ImZF)
+            L1 = _sigmoid_to_range(U_raw, self.L1_lo, self.L1_hi)  # U_raw is now scalar
             pred_tf = self.fm.compute_H_complex(L1, ZF, ZL) #[1, 500]
             loss = self.loss_fn(pred_tf, obs_tf, noise_var)
             opt.zero_grad()
             loss.backward()
             opt.step()
 
-            if i % 500 == 0:
-                ReZF_normalized = torch.sigmoid(U_raw)
+            if i % 200 == 0:
+                L1_normalized = torch.sigmoid(U_raw)
                 print(f"step {i} | loss {loss.item():.4f}")
-                print(f"ReZF_normalized (sigmoid)={ReZF_normalized.item():.4f} | True value is 0.025")
+                print(f"l1_normalized (sigmoid)={L1_normalized.item():.4f} | True value is 0.25")
 
     def predict3(self, obs_tf, noise_var):
         """
