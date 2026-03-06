@@ -16,12 +16,12 @@ import pyro.poutine as poutine
 import pyro.optim as optim
 from pyro.infer import SVI, Trace_ELBO
 import torch
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import defaultdict
-
-import scipy as sp 
-import numpy as np
 import time
+
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
@@ -476,7 +476,15 @@ network_params = {
         "Z_fault_real": {"value": 100.0, "inferred": True, "range": (0.0, 4000.0)},
         "Z_fault_imag": {"value": -50.0, "inferred": True, "range": (-100.0, 100.0)}
     },
+    "admittance_parameters": {
+        "Y_1": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
+        "Y_2": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
+        "Y_3": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
+        "Y_4": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
+        "Y_5": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
+    },
     "loads": {}  # Dynamically generated based on load type
+
 
 }
 def get_total_backbone_length(cable_lengths):
@@ -973,6 +981,8 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     Y_reccarried = carry_back_load(rho1, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{0}"])
     #node1 (Y62)
     Y_node2 = Y_reccarried + Y_loads["load_0"]
+   # print("Y1", Y_loads["load_0"])
+    
     rho2 = reflection_coefficient(Y_node2, T_r, Tinv_r, ZC_r, YC_r)
     h2 = h_B(rho2, ZC_r, T_r, Tinv_r, gamma_r, cable_lengths[f"l_w_{1}"])
     Y_node2carried = carry_back_load(rho2, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{1}"])
@@ -982,6 +992,8 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     Y_61 = Y_63 + Y_loads["load_2"]
     rho61 = reflection_coefficient(Y_61, T_r, Tinv_r, ZC_r, YC_r)
     Y_6 = carry_back_load(rho61, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{3}"])
+   # print("Y2", Y_6)
+    
     Y_node3 = Y_node2carried + Y_6
     rho3 = reflection_coefficient(Y_node3, T_s, Tinv_s, ZC_s, YC_s)
     h3 = h_B(rho3, ZC_s, T_s, Tinv_s, gamma_s, cable_lengths[f"l_w_{4}"])
@@ -1011,6 +1023,7 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     T_r, Tinv_r, ZC_r, YC_r, gamma_r,
     T_s, Tinv_s, ZC_s, YC_s, gamma_s
 )
+   # print("Y3", Y_5 + Y_4 + Y_3 + Y_2)
     Y_node4 = Y_node3carried + Y_5 + Y_4 + Y_3 + Y_2
     rho4 = reflection_coefficient(Y_node4, T_s, Tinv_s, ZC_s, YC_s)
     h4= h_B(rho4, ZC_s, T_s, Tinv_s, gamma_s, cable_lengths[f"l_w_{25}"])
@@ -1021,6 +1034,7 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     Y_12 = Y_14 + Y_loads["load_20"]
     rho12 = reflection_coefficient(Y_12, T_r, Tinv_r, ZC_r, YC_r)
     Y_1 = carry_back_load(rho12, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{27}"])
+   # print("Y4", Y_1)
     Y_node5 = Y_node4carried + Y_1
     rho5 = reflection_coefficient(Y_node5, T_r, Tinv_r, ZC_r, YC_r)
     h5 = h_B(rho5, ZC_r, T_r, Tinv_r, gamma_r, cable_lengths[f"l_w_{28}"])
@@ -1028,6 +1042,8 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     # node5 Transmitter Y13 connected in parallel
     rho13 = reflection_coefficient(Y_loads["load_21"], T_r, Tinv_r, ZC_r, YC_r)
     Y_13 = carry_back_load(rho13, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{29}"])
+   # print("Y5", Y_13)
+    
     Y_node6 = Y_node5carried + Y_13
 
     YTalpha = (ZT12*ZT13 + ZTG1*ZT13 + ZTG1*ZT12)/(ZTG1*ZT12*ZT13)
@@ -1367,19 +1383,6 @@ def guide(H1_noisy):
 
 
 
-def estimate_sigmoid_normal_means(loc, scale, num_samples=2048):
-    """
-    Returns:
-      sigmoid_loc: sigmoid(E[z]) = sigmoid(loc)
-      mc_mean:     E[sigmoid(z)] estimated by Monte Carlo sampling
-    """
-    with torch.no_grad():
-        sigmoid_loc = torch.sigmoid(loc).item()
-        q = TransformedDistribution(dist.Normal(loc, scale), [SigmoidTransform()])
-        mc_mean = q.sample((num_samples,)).mean().item()
-
-    return sigmoid_loc, mc_mean
-
 
 def extract_posterior_means(param_history, num_samples=2048):
     """
@@ -1459,7 +1462,7 @@ def update_network_params_from_posterior(posterior_means):
 
 
 def run_two_stage_inference(cable_lengths, load_params, fault_params,
-                            omega, snr_db=40, num_steps_stage1=20000, num_steps_stage2=20000,
+                            omega, snr_db=40, num_steps_stage1=100, num_steps_stage2=100,
                             threshold=0.0):
     """
     Run the complete two-stage inference workflow:
@@ -1587,15 +1590,15 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
         for key in sorted_keys[:20]
     ]    
     losses = []
-    param_history = defaultdict(list) #Contains tensors
+    param_history = defaultdict(list)  # Contains Python floats (more memory efficient)
 
     # Initialize parameters by running guide once
     guide(H1_noisy)
 
-    # Save initial parameter values 
+    # Save initial parameter values
     param_store = pyro.get_param_store()
     for name, value in param_store.items():
-        param_history[name].append(value.detach().clone())
+        param_history[name].append(value.detach().item())
     
     for step in range(num_steps):
         loss = svi.step(H1_noisy)
@@ -1603,7 +1606,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
 
         param_store = pyro.get_param_store()
         for name, value in param_store.items():
-            param_history[name].append(value.detach().clone())
+            param_history[name].append(value.detach().item())
         
         if step % 25 == 0 or step == 0:
             print(f"\n===== Step {step} | ELBO: {loss:.6f} =====")
@@ -1634,9 +1637,9 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
     plt.subplot(1, 2, 1)
     loc_keys = [k for k in param_history if "loc" in k]
     for key in loc_keys:
-        vals = torch.stack(param_history[key])
-        vals_sigmoid = torch.sigmoid(vals)
-        plt.plot(vals_sigmoid.numpy(), alpha=0.7)
+        vals = np.array(param_history[key])
+        vals_sigmoid = 1 / (1 + np.exp(-vals))  # sigmoid in numpy
+        plt.plot(vals_sigmoid, alpha=0.7)
 
     plt.title("Mean Convergence (normalized)")
     plt.xlabel("SVI step")
@@ -1647,8 +1650,7 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
     plt.subplot(1, 2, 2)
     scale_keys = [k for k in param_history if "scale" in k]
     for key in scale_keys:
-        vals = torch.stack(param_history[key])
-        plt.plot(vals.numpy(), alpha=0.7)
+        plt.plot(param_history[key], alpha=0.7)  # matplotlib accepts lists directly
     plt.title("Scale Convergence")
     plt.xlabel("SVI step")
     plt.ylabel("Variational scale (std dev)")
@@ -1666,14 +1668,13 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
     print(f"{'Parameter':30s} | {'q-mean':>8s} | {'true':>8s} | {'error':>10s}")
     print("-" * 65)
 
-    # Custom guide: name_loc
     for name in top_20_keys:
         pyro_loc_key = name.replace(".", "_") + "_loc"
         if pyro_loc_key not in param_history:
             print(f"{name:30s} | q-mean = N/A")
             continue
         raw_loc = param_history[pyro_loc_key][-1]
-        q_mean = torch.sigmoid(raw_loc).item()
+        q_mean = 1 / (1 + np.exp(-raw_loc))  # sigmoid for Python float
 
         # Get true value (normalized) from network_params
         if pyro_loc_key == "Z_fault_real_loc":
@@ -1842,8 +1843,9 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
                     lo, hi = param_info["range"]
                     loc = param_history[pyro_key][-1]
                     scale = param_history[f"{load_name}_{param_name}_scale"][-1]
-                    z = torch.normal(mean=loc, std=scale)
-                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi), device=device)
+                    z = np.random.normal(loc, scale)
+                    sigmoid_z = 1 / (1 + np.exp(-z))
+                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(sigmoid_z, lo, hi), device=device)
                 else:
                     sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"], device=device)
 
@@ -1853,8 +1855,9 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
                 lo, hi = cable_info.get("infer_range", cable_info["range"])
                 loc = param_history[pyro_key][-1]
                 scale = param_history[f"{cable_name}_scale"][-1]
-                z = torch.normal(mean=loc, std=scale)
-                sampled_cable_lengths[cable_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi), device=device)
+                z = np.random.normal(loc, scale)
+                sigmoid_z = 1 / (1 + np.exp(-z))
+                sampled_cable_lengths[cable_name] = torch.tensor(denormalize(sigmoid_z, lo, hi), device=device)
             else:
                 sampled_cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
 
@@ -1865,8 +1868,9 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
                     lo, hi = fault_info["range"]
                     loc = param_history[pyro_key][-1]
                     scale = param_history[f"{fault_name}_scale"][-1]
-                    z = torch.normal(mean=loc, std=scale)
-                    sampled_fault_params[fault_name] = torch.tensor(denormalize(torch.sigmoid(z).item(), lo, hi), device=device)
+                    z = np.random.normal(loc, scale)
+                    sigmoid_z = 1 / (1 + np.exp(-z))
+                    sampled_fault_params[fault_name] = torch.tensor(denormalize(sigmoid_z, lo, hi), device=device)
                 else:
                     sampled_fault_params[fault_name] = torch.tensor(fault_info["value"], device=device)
                     
@@ -2182,8 +2186,8 @@ if __name__ == '__main__':
             fault_params=fault_params,
             omega=omega,
             snr_db=40,
-            num_steps_stage1=100,
-            num_steps_stage2=100,
+            num_steps_stage1=50,
+            num_steps_stage2=50,
             threshold=0.0
         )
         losses_s1, param_history_s1, sorted_keys_s1 = stage1_results
