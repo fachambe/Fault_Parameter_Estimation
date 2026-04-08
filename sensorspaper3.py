@@ -1,9 +1,15 @@
 import numpy as np
 import random
 import pyro
+import torch
 import copy
 import math
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import time
+import pyro.distributions as dist
 
 from pyro.distributions.transforms import SigmoidTransform, AffineTransform
 from pyro.distributions import TransformedDistribution, constraints
@@ -11,15 +17,11 @@ from torch.distributions import constraints
 from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.infer.autoguide import AutoMultivariateNormal, AutoGuideList, AutoNormal
 from scipy.linalg import expm
+from torch.func import jacfwd
 
-import pyro.distributions as dist
 from pyro.infer import SVI, Trace_ELBO
-import torch
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from collections import defaultdict
-import time
+
 
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
@@ -30,7 +32,7 @@ SCENARIO = "two_stage"
 #   - "no_fault": Network identification only (Stage 1) - infer load/cable params
 #   - "with_fault": Fault localization only - infer fault params (assumes known network)
 #   - "two_stage": Full workflow - Stage 1 (network ID) then Stage 2 (fault localization)
-FORWARD_MODEL = "admittance"  # "full" or "admittance"
+FORWARD_MODEL = "full"  # "full" or "admittance"
 OPTIMIZER = "Adagrad"  # "Adam" or "Adagrad"
 LR = 0.2  # Learning rate for optimizer
 
@@ -1935,6 +1937,65 @@ def extract_posterior_means(param_history, num_samples=2048):
     return posterior_means
 
 
+def calculate_rmse_per_parameter(param_history, sorted_keys, true_normalized_value=0.25, num_samples=2048):
+    """
+    Calculate RMSE (error) for each parameter comparing posterior mean to true value.
+    Only includes parameters in sorted_keys, returned in that order.
+
+    Args:
+        param_history: dict of parameter trajectories from SVI
+        sorted_keys: list of parameter names to include (in desired order)
+        true_normalized_value: true value in normalized [0,1] space (default 0.25)
+        num_samples: number of MC samples for computing posterior mean
+
+    Returns:
+        dict: {param_name: error} in sorted_keys order
+    """
+    posterior_means = extract_posterior_means(param_history, num_samples)
+
+    rmse_dict = {}
+    for key in sorted_keys:
+        # Convert key format: sorted_keys uses dots, posterior_means uses underscores
+        posterior_key = key.replace(".", "_")
+        if posterior_key in posterior_means:
+            rmse_dict[key] = abs(posterior_means[posterior_key] - true_normalized_value)
+
+    return rmse_dict
+
+
+def print_rmse_table(rmse_results, sorted_keys=None):
+    """
+    Print a formatted table of RMSE results.
+
+    Args:
+        rmse_results: dict from calculate_rmse_per_parameter()
+        sorted_keys: optional list of parameter names to control print order
+    """
+    print("\n" + "=" * 80)
+    print(f"{'Parameter':<30} {'Post. Mean':<12} {'True':<8} {'Error':<12} {'Sq. Error':<12}")
+    print("-" * 80)
+
+    per_param = rmse_results['per_parameter']
+
+    if sorted_keys:
+        # Print in specified order, only for params that exist
+        keys_to_print = [k for k in sorted_keys if k in per_param]
+    else:
+        # Print all in alphabetical order
+        keys_to_print = sorted(per_param.keys())
+
+    for param_name in keys_to_print:
+        info = per_param[param_name]
+        print(f"{param_name:<30} {info['mean']:<12.4f} {0.25:<8.2f} {info['error']:<12.4f} {info['squared_error']:<12.6f}")
+
+    print("-" * 80)
+    print(f"{'Overall MSE:':<30} {rmse_results['overall_mse']:.6f}")
+    print(f"{'Overall RMSE:':<30} {rmse_results['overall_rmse']:.6f}")
+    print("=" * 80)
+
+
+
+
 def update_network_params_from_posterior(posterior_means):
     """
     Update network_params with inferred posterior means from Stage 1.
@@ -2158,7 +2219,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
     param_store = pyro.get_param_store()
     for name, value in param_store.items():
         param_history[name].append(value.detach().item())
-    
+
     for step in range(num_steps):
         loss = svi.step(H1_noisy)
         losses.append(loss)
@@ -2184,10 +2245,10 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
     plt.title("SVI ELBO Loss")
     plt.xlabel("SVI step")
     plt.ylabel("ELBO loss")
-    plt.yscale("log")
+    plt.yscale("symlog")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"{FILENAME_PREFIX}_svi_elbo_loss_{scenario}.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{FILENAME_PREFIX}_svi_elbo_loss_{scenario}.pdf", dpi=300, bbox_inches='tight')
     plt.close()
 
     # Parameter Plots
@@ -2216,7 +2277,7 @@ def plot_param_convergence(param_history, losses, sorted_keys, scenario):
     plt.ylabel("Variational scale (std dev)")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"{FILENAME_PREFIX}_svi_param_convergence_{scenario}.png", dpi=300, bbox_inches='tight')
+    plt.savefig(f"{FILENAME_PREFIX}_svi_param_convergence_{scenario}.pdf", dpi=300, bbox_inches='tight')
     plt.close()
 
     # --------- PRINT FINAL MEANS FOR TOP 20 MOST SENSITIVE ----------
@@ -2273,9 +2334,12 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
     Perform sensitivity analysis on network parameters.
     Supports both full model (load + all cables) and admittance model (admittance params + backbone cables).
 
-    Args:
-        admittance_params: Required when FORWARD_MODEL == "admittance"
+    Returns:
+    Selected_keys: List of selected params like ['load_0.C_m_leak', 'load_1.C_m_leak', 'load_3.C_m_leak'm ...] not sorted
+    Sorted_keys: List of all params sorted from most sensitive to least sensitive
+    Sensitivities: List of corresponding sensitivities to Sorted_keys
     """
+
     variations = {}
 
     if FORWARD_MODEL == "full":
@@ -2292,7 +2356,11 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
                     continue
 
                 lo, hi = param_info["range"]
-                values = np.linspace(lo, hi, 10)
+                # Use log scale for resistance parameters (wide range)
+                if param_name in ["R_const", "R_s", "R_p", "R_m1"]:
+                    values = np.logspace(np.log10(max(lo, 1e-6)), np.log10(max(hi, 1e-6)), 10)
+                else:
+                    values = np.linspace(lo, hi, 10)
                 param_variations = []
 
                 for val in values:
@@ -2419,7 +2487,7 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
     # Normalize
     total_sum = sum(variations.values())
     normalized = {k: v / total_sum for k, v in variations.items()}
-
+    sensitivities = []
     # Select parameters above threshold
     selected = [k for k, v in normalized.items() if v > threshold]
     flag = True
@@ -2429,13 +2497,50 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
         if normalized[k] <= threshold and flag:
             print("Parameters after this are below the threshold")
             flag = False
-        print(f"{k}: {normalized[k]*100:.2f}%")
+        print(f"{k}: {normalized[k]*100:.5f}%")
+        sensitivities.append(f"{normalized[k]*100:.5f}%")
+
 
     print(f"\nSelected parameters (>{threshold*100:.2f}%): {selected}")
     print(f"Number of selected parameters: {len(selected)}")
 
+    # Set inferred=False for non-sensitive parameters (only if threshold > 0)
+    if threshold > 0:
+        disabled_count = 0
+        for param_key, sensitivity in normalized.items():
+            if sensitivity <= threshold:
+                # Parse the param_key to find where it belongs
+                if "." in param_key:
+                    # Load or admittance parameter: "load_0.C_m" or "branch_0.param"
+                    parts = param_key.split(".")
+                    entity_name = parts[0]
+                    param_name = parts[1]
+
+                    # Check if it's a load parameter
+                    if entity_name in network_params["loads"]:
+                        if param_name in network_params["loads"][entity_name]:
+                            network_params["loads"][entity_name][param_name]["inferred"] = False
+                            disabled_count += 1
+                    # Check if it's an admittance parameter
+                    elif "admittance_parameters" in network_params and entity_name in network_params["admittance_parameters"]:
+                        if param_name in network_params["admittance_parameters"][entity_name]:
+                            network_params["admittance_parameters"][entity_name][param_name]["inferred"] = False
+                            disabled_count += 1
+                else:
+                    # Cable length or fault parameter
+                    if param_key in network_params["cable_lengths"]:
+                        network_params["cable_lengths"][param_key]["inferred"] = False
+                        disabled_count += 1
+                    elif "fault_parameters" in network_params and param_key in network_params["fault_parameters"]:
+                        network_params["fault_parameters"][param_key]["inferred"] = False
+                        disabled_count += 1
+
+        print(f"\nDisabled inference for {disabled_count} non-sensitive parameters (sensitivity <= {threshold*100:.2f}%)")
+
     sorted_keys = sorted(normalized, key=normalized.get, reverse=True)
-    return selected, sorted_keys
+    #sort selected keys too
+    selected = sorted(selected, key=normalized.get, reverse=True)
+    return selected, sorted_keys, sensitivities
 
 def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
     true_tf_db = 20*torch.log10(torch.abs(true_tf))
@@ -2540,10 +2645,10 @@ def plot_CI_and_pred_TF(param_history, true_tf, scenario, num_samples=200):
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(f'{FILENAME_PREFIX}_tf_posterior_CI_{scenario}.png', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{FILENAME_PREFIX}_tf_posterior_CI_{scenario}.pdf', dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Saved figure to {FILENAME_PREFIX}_tf_posterior_CI_{scenario}.png")
+    print(f"Saved figure to {FILENAME_PREFIX}_tf_posterior_CI_{scenario}.pdf")
     return tf_mean, tf_lower, tf_upper
 
 
@@ -2797,6 +2902,545 @@ def validate_reduced_model(cable_lengths, load_params, admittance_params, save_p
     
     return {"mae": mae, "rmse": rmse, "max_error": max_error, "error_db": error_db}
 
+#CRLB helper functions
+def get_inferred_param_order():
+    """
+    Get ordered list of inferred parameters for consistent flat tensor indexing.
+
+    Returns:
+        param_order: List of tuples describing each parameter:
+            - ("cable", cable_name, None) for cable lengths
+            - ("load", load_name, param_name) for load parameters
+        num_params: Total number of inferred parameters
+    """
+    param_order = []
+
+    # Cable lengths first (in sorted order for consistency)
+    for cable_name in sorted(network_params["cable_lengths"].keys(), key=lambda x: int(x.split("_")[-1])):
+        if network_params["cable_lengths"][cable_name]["inferred"]:
+            param_order.append(("cable", cable_name, None))
+
+    # Load parameters (sorted by load number, then by param name)
+    for load_name in sorted(network_params["loads"].keys(), key=lambda x: int(x.split("_")[-1])):
+        for param_name in sorted(network_params["loads"][load_name].keys()):
+            if network_params["loads"][load_name][param_name]["inferred"]:
+                param_order.append(("load", load_name, param_name))
+
+    return param_order, len(param_order)
+
+
+def get_true_param_flat():
+    """
+    Get flat tensor of true parameter values in the order defined by get_inferred_param_order().
+
+    Returns:
+        params_flat: [P] tensor of true parameter values in physical units
+    """
+    param_order, num_params = get_inferred_param_order()
+    params_flat = torch.zeros(num_params, dtype=torch.float32, device=device)
+
+    for i, (ptype, name, subname) in enumerate(param_order):
+        if ptype == "cable":
+            params_flat[i] = network_params["cable_lengths"][name]["value"]
+        elif ptype == "load":
+            params_flat[i] = network_params["loads"][name][subname]["value"]
+
+    return params_flat
+
+
+def build_params_from_flat(params_flat, param_order):
+    """
+    Unpack flat parameter tensor into cable_lengths and load_params dictionaries.
+
+    Args:
+        params_flat: [P] tensor of parameter values
+        param_order: List from get_inferred_param_order()
+
+    Returns:
+        cable_lengths: Dict of cable length tensors
+        load_params: Dict of load parameter dicts
+    """
+    # Initialize with non-inferred (fixed) values
+    cable_lengths = {}
+    for cable_name, cable_info in network_params["cable_lengths"].items():
+        cable_lengths[cable_name] = torch.tensor(cable_info["value"], dtype=torch.float32, device=device)
+
+    load_params = {}
+    for load_name, params in network_params["loads"].items():
+        load_params[load_name] = {}
+        for param_name, param_info in params.items():
+            load_params[load_name][param_name] = torch.tensor(param_info["value"], dtype=torch.float32, device=device)
+
+    # Override with values from flat tensor
+    for i, (ptype, name, subname) in enumerate(param_order):
+        if ptype == "cable":
+            cable_lengths[name] = params_flat[i]
+        elif ptype == "load":
+            load_params[name][subname] = params_flat[i]
+
+    return cable_lengths, load_params
+
+
+def H_nofault_wrapper(params_flat):
+    """
+    Wrapper for calculate_Hnw_nofault that takes a flat parameter tensor,
+    converts it to dict format that serves as acceptable input for calculate_Hnw_nofault. 
+
+    Returns [F, 2] real tensor (Re, Im stacked) for Jacobian computation.
+
+    Args:
+        params_flat: [P] tensor of inferred parameter values
+
+    Returns:
+        H_real_imag: [F, 2] tensor where [:, 0] = Re(H), [:, 1] = Im(H)
+    """
+    param_order, _ = get_inferred_param_order()
+    cable_lengths, load_params = build_params_from_flat(params_flat, param_order)
+
+    # Compute transfer function
+    H = calculate_Hnw_nofault(cable_lengths, load_params)  # [F] complex
+
+    # Stack real and imaginary parts
+    return torch.stack([H.real, H.imag], dim=-1)  # [F, 2]
+
+def H_fault_wrapper(params_complex, params_real):
+    """
+    Wrapper for calculate_Hnw_fault. Complex params 
+    """
+    H = calculate_Hnw(cable_lengths, load_params, fault_params)  # [F] complex
+
+def build_S2_from_nullspace(U2, tol=1e-8):
+    """
+    Build selector matrix S2 consisting only of original parameters theta_i
+    whose standard basis vectors e_i are orthogonal to Null(J).
+
+    Parameters
+    ----------
+    U2 : torch.Tensor, shape [p, p-r]
+        Columns of U2 form an orthonormal basis for Null(J).
+    tol : float
+        Numerical tolerance for deciding whether a row is zero.
+
+    Returns
+    -------
+    S2 : torch.Tensor, shape [m, p]
+        Selector matrix picking only coordinates fully orthogonal to Null(J).
+    keep_indices : list[int]
+        Indices i such that e_i ⟂ Null(J).
+    """
+    p = U2.shape[0]
+    row_norms = torch.linalg.norm(U2, dim=1)   # norm of each row
+    keep_mask = row_norms < tol
+    keep_indices = torch.nonzero(keep_mask, as_tuple=True)[0].tolist()
+
+    S2 = torch.eye(p, dtype=U2.dtype, device=U2.device)[keep_mask]
+    return S2, keep_indices
+
+
+def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
+    """
+    g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately)
+    P = number of parameters (inputs)
+    F = number of frequencies (outputs)
+    Compute Real Fisher Information Matrix and CRLB for P inferred real parameters.
+    Note FIM and CRLB are normalized here. 
+    Uses float64 precision for numerical stability.
+
+    Args:
+        var_f: Noise variance (determined by SNR) [] if white noise (constant)
+        or [F] if frequency dependent
+    Returns:
+        CRLB_U1U1T: [P] Dict of sqrt Cramér-Rao Lower Bounds for alpha = U1U1^T theta
+        CRLB_S2: Dict of sqrt Cramér-Rao Lower Bounds for alpha = S2 theta
+    """
+    param_order_list, _ = get_inferred_param_order()
+
+    # Use float64 for CRLB computation (better numerical precision)
+    params_flat = get_true_param_flat().double()
+    var_f_64 = var_f.double() if isinstance(var_f, torch.Tensor) else torch.tensor(var_f, dtype=torch.float64)
+
+    # Wrapper that ensures float64 output
+    def H_nofault_wrapper_f64(params):
+        param_order, _ = get_inferred_param_order()
+        cable_lengths, load_params = build_params_from_flat(params, param_order)
+        H = calculate_Hnw_nofault(cable_lengths, load_params)
+        # Convert to complex128 and stack
+        H = H.to(torch.complex128)
+        return torch.stack([H.real, H.imag], dim=-1)
+
+    # Compute Jacobian dH/dtheta in float64
+    J = jacfwd(H_nofault_wrapper_f64)(params_flat)  # [F, 2, P]
+
+    # Build scaling vector s_p = d theta_p / d phi_p
+    scale_list = [] #[P]
+
+    # Cable lengths
+    for cable_name in sorted(network_params["cable_lengths"].keys(), key=lambda x: int(x.split("_")[-1])):
+        if network_params["cable_lengths"][cable_name]["inferred"]:
+            min_val, max_val = network_params["cable_lengths"][cable_name]["range"]
+            s = max_val - min_val
+            scale_list.append(s)
+    # Load parameters
+    for load_name in sorted(network_params["loads"].keys(), key=lambda x: int(x.split("_")[-1])):
+        for param_name in sorted(network_params["loads"][load_name].keys()):
+            if network_params["loads"][load_name][param_name]["inferred"]:
+                min_val, max_val = network_params["loads"][load_name][param_name]["range"]
+                true_val = network_params["loads"][load_name][param_name]["value"]
+                if param_name in ["R_const", "R_s", "R_p", "R_m1"]:
+                    s = true_val * (math.log(max_val) - math.log(min_val))
+                    scale_list.append(s)
+                else:
+                    s = max_val - min_val
+                    scale_list.append(s)
+    scale = torch.tensor(scale_list, dtype=torch.float64, device=J.device)   # [P]
+    D = torch.diag(scale) #[P, P] 
+
+    Delta = J[:, 0, :] + 1j * J[:, 1, :]  # ∂g/∂θ [F, P] complex
+    Delta_tilde = J[:, 0, :] - 1j * J[:, 1, :]  # ∂g*/∂θ = (∂g/∂θ)^* for real θ [F, P] complex
+
+    Delta = Delta.unsqueeze(-1)         # [F, P, 1]
+    Delta_tilde = Delta_tilde.unsqueeze(-1)  # [F, P, 1]
+    # Δ_f ⊗ Δ̃_f^T + Δ̃_f ⊗ Δ_f^T = 2*Re(Δ⊗Δᴴ) which is real
+    I_f = (Delta @ Delta_tilde.transpose(-1,-2)) + (Delta_tilde @ Delta.transpose(-1,-2))  # [F, P, P]
+    # FIM should be real - take real part (imag should be ~0 due to numerics)
+    I = ((1 / var_f_64) * I_f.sum(dim=0)).real  # [P, P] real and should be symmetric + PSD
+    I2 = D.T @ I @ D
+
+    # #Unnormalized FIM
+    # eigvals, eigvecs = torch.linalg.eigh(I)
+    # rank = torch.linalg.matrix_rank(I)
+    # print("Rank of FIM", rank)
+    # dimension = I.shape[0]
+    # singular = rank < dimension
+    # print("FIM is singular?", singular)
+    # print("Eigvals of FIM (descending)", torch.sort(eigvals, descending=True).values)
+    # U, S, Vh = torch.linalg.svd(I)
+    # print("Singular values of FIM(descending)", torch.sort(S, descending=True).values)
+
+    # eps = torch.finfo(I2.dtype).eps
+    # rtol = max(I2.shape[-2], I2.shape[-1]) * eps
+    # tol = rtol * S.max()           # since default atol = 0
+
+    # num_zeroed = (S <= tol).sum().item()
+    # num_kept = (S > tol).sum().item()
+
+    # print(f"eps       = {eps:.3e}")
+    # print(f"rtol      = {rtol:.3e}")
+    # print(f"sigma_max = {S.max().item():.3e}")
+    # print(f"tol       = {tol.item():.3e}")
+    # print(f"zeroed    = {num_zeroed}")
+    # print(f"kept      = {num_kept}")
+
+    #Normalized FIM
+    eigvals2, eigvecs2 = torch.linalg.eigh(I2) 
+    dimension2 = I2.shape[0]
+    rank2 = torch.linalg.matrix_rank(I2)
+    print("Rank of Normalized FIM", rank2)
+    singular2 = rank2 < dimension2
+    print("Normalized FIM is singular?", singular2)
+    print("Eigvals of Normalized FIM (descending)", torch.sort(eigvals2, descending=True).values)
+
+    U, S, Vh = torch.linalg.svd(I2)
+    
+    print("Singular values of Normalized FIM (descending)", torch.sort(S, descending=True).values)
+
+    eps = torch.finfo(I2.dtype).eps
+    rtol = max(I2.shape[-2], I2.shape[-1]) * eps
+    tol = rtol * S.max()           # since default atol = 0
+
+    num_zeroed = (S <= tol).sum().item()
+    num_kept = (S > tol).sum().item()
+
+    print(f"eps       = {eps:.3e}")
+    print(f"rtol      = {rtol:.3e}")
+    print(f"sigma_max = {S.max().item():.3e}")
+    print(f"tol       = {tol.item():.3e}")
+    print(f"zeroed    = {num_zeroed}")
+    print(f"kept      = {num_kept}")
+    
+    # Diagnostic: parameter sensitivities
+    J_flat = J.reshape(-1, J.shape[-1])  # [F*2, P]
+    param_sensitivity = torch.abs(J_flat).max(dim=0).values
+
+    print(f"Jacobian range: [{param_sensitivity.min():.2e}, {param_sensitivity.max():.2e}]")
+    print(f"Ratio: {param_sensitivity.max()/param_sensitivity.min():.2e}")
+
+    tol = 1e-8
+    mask = eigvals2 > tol
+
+    Lambda1 = eigvals2[mask]          # shape [r]
+    U1 = eigvecs2[:, mask]            # shape [p, r]
+    U2 = eigvecs2[:, ~mask]            #shape[p, p-r] 
+
+    J_pinv = U1 @ torch.diag(1.0 / Lambda1) @ U1.T
+    J_pinv_torch = torch.linalg.pinv(I2)
+    #Sanity check they should be equal
+    print("max |manual pinv - torch pinv| =", torch.max(torch.abs(J_pinv - J_pinv_torch)).item())
+
+    
+    S2, keep_indices = build_S2_from_nullspace(U2, tol=1e-8)
+
+    print("keep_indices =", keep_indices)
+    print("param order", param_order_list)
+    print("S2 shape =", S2.shape)
+    print("S2 =\n", S2)
+    
+    SU2 = S2 @ U2
+    print("S2 @ U2 =\n", SU2)
+    print("||S2 @ U2||_F =", torch.linalg.norm(SU2).item())
+    print("max |S2 @ U2| =", torch.max(torch.abs(SU2)).item())
+
+
+    CRLB_U1T = 1.0 / Lambda1
+    CRLB_U1U1T = torch.diag(J_pinv)
+    CRLB_S2 = torch.diag(S2 @ J_pinv @ S2.T)
+
+    # CRLB for $\alpha = U_1^T theta$ should be just Lambda_1^{-1} 
+    # CRLB for $\alpha = U_1 U_1^T theta$ is J^{\dagger}
+    # CRLB_normalized = torch.diag(torch.linalg.pinv(I2))
+    # Cov_physical = D @ torch.linalg.pinv(I2) @ D   # [P, P] matrix
+    # CRLB_reconstructed = torch.diag(Cov_physical)  # [P] vector
+
+    # Build mapping from param_order_list index to sorted_keys_s1 key
+    def param_order_to_key(entry):
+        """Convert param_order_list entry to sorted_keys_s1 format."""
+        param_type, name1, name2 = entry
+        if param_type == "cable":
+            return name1  # e.g., "l_w_4"
+        else:
+            return f"{name1}.{name2}"  # e.g., "load_1.C_s"
+
+    # Create mapping: key -> index in param_order_list.
+    key_to_idx = {param_order_to_key(param_order_list[i]): i for i in range(len(param_order_list))}
+
+
+    print("="*220)
+    print(f"{'Idx':<5} {'Parameter':<22} {'Sens':<10} {'CRLB S2':<14} {'Unc S2':<10} {'CRLB U1U1T':<14} {'Unc U1U1T':<10}")
+    print("-"*220)
+
+    # Build dicts sorted by sorted_keys_s1 order
+    crlb_u1u1t_dict = {}  # key -> CRLB value
+    crlb_s2_dict = {}     # key -> CRLB value (only for params in keep_indices)
+
+    # Print in sorted_keys_s1 order
+    for index, key in enumerate(sorted_keys_s1):
+        if key not in key_to_idx:
+            continue
+        i = key_to_idx[key]
+        sens = sensitivities[index]
+        crlb_u1u1t = CRLB_U1U1T[i].item()
+        crlb_u1u1t_dict[key] = math.sqrt(crlb_u1u1t)
+        uncert_u1u1t_pct = math.sqrt(crlb_u1u1t) * 100
+        if i in keep_indices:
+            s2_idx = keep_indices.index(i)
+            crlb_s2 = CRLB_S2[s2_idx].item()
+            crlb_s2_dict[key] = math.sqrt(crlb_s2)
+            uncert_s2_pct = math.sqrt(crlb_s2) * 100
+            crlb_s2_str = f"{crlb_s2:.2e}"
+            uncert_s2_str = f"{uncert_s2_pct:.2f}%"
+        else:
+            crlb_s2_str = "N/A"
+            uncert_s2_str = "N/A"
+
+        print(f"{i:<5} {key:<22} {sens:<10}  {crlb_s2_str:<14} {uncert_s2_str:<10} {crlb_u1u1t:<14.2e} {uncert_u1u1t_pct:>5.2f}%")
+
+    print("="*220)
+    return crlb_u1u1t_dict, crlb_s2_dict
+
+    
+@torch.no_grad()
+def fim_from_complex_jac_general(du_aug, var_NF, p1, p2):
+    """
+    Build the augmented complex FIM from Wirtinger Jacobians.
+    Generalized for p1 complex parameters and p2 real parameters.
+
+    The augmented parameter vector is ordered as:
+        θ_aug = [z_1, ..., z_p1, z_1*, ..., z_p1*, r_1, ..., r_p2]
+
+    Total augmented dimension: 2*p1 + p2
+
+    Inputs
+    ------
+    du_aug : [F, 2*p1 + p2] complex
+        Columns in GROUPED order:
+            [∂u/∂z_1, ..., ∂u/∂z_p1, ∂u/∂z_1*, ..., ∂u/∂z_p1*, ∂u/∂r_1, ..., ∂u/∂r_p2]
+
+    var_NF : [F] or scalar, real
+        Noise variance σ² per frequency.
+
+    p1 : int
+        Number of complex parameters
+
+    p2 : int
+        Number of real parameters
+
+    Returns
+    -------
+    I : [2*p1 + p2, 2*p1 + p2] complex
+        Augmented complex Fisher information matrix.
+
+    Notes
+    -----
+    Key Wirtinger identities for conjugated output u*:
+        ∂u*/∂z   = (∂u/∂z*)*
+        ∂u*/∂z*  = (∂u/∂z)*
+        ∂u*/∂r   = (∂u/∂r)*
+
+    The permutation to get du*/dθ_aug from du/dθ_aug:
+        - Swap z_i with z_i* for each complex parameter
+        - Keep real parameters in place
+        - Conjugate everything
+    """
+    p_aug = 2 * p1 + p2  # Total augmented dimension
+
+    # Build permutation: [p1:2*p1, 0:p1, 2*p1:2*p1+p2]
+    # When p1=0, this reduces to identity permutation [0, 1, ..., p2-1]
+    # This swaps z with z* and keeps r in place
+    perm = list(range(p1, 2*p1)) + list(range(0, p1)) + list(range(2*p1, p_aug))
+    perm_tensor = torch.tensor(perm, device=du_aug.device)
+
+    # Get du*/dθ_aug by permuting and conjugating
+    du_star = du_aug.index_select(-1, perm_tensor).conj()  # [F, p_aug]
+
+    # print("du_aug", du_aug)
+    # print("du_star", du_star)
+    # print("du aug shape", du_aug.shape)
+    # print("du star shape", du_star.shape)
+    
+    # Build FIM: I = Σ_f (1/σ²) * [∂u/∂θ^H @ ∂u/∂θ + ∂u*/∂θ^H @ ∂u*/∂θ]
+    f = du_aug.unsqueeze(-1)      # [F, p_aug, 1]
+    i = du_star.unsqueeze(-1)     # [F, p_aug, 1]
+
+    # [F, p_aug, p_aug]
+    I_f = (f.conj() @ f.transpose(-1, -2)) + (i.conj() @ i.transpose(-1, -2))
+    # Weight by 1/variance and sum over frequencies
+    if isinstance(var_NF, (int, float)):
+        w = 1.0 / var_NF
+    else:
+        w = (1.0 / var_NF).unsqueeze(-1).unsqueeze(-1)  # [F, 1, 1]
+
+    I = (I_f * w).sum(dim=0)  # [p_aug, p_aug]
+
+    return I
+
+
+
+def compute_complex_partials_general(forward_fn, params_complex, params_real):
+    """
+    Compute Wirtinger partial derivatives for general parameter sets.
+
+    Args:
+        forward_fn: Function that takes (z_re, z_im, r) tensors and returns [F] complex output
+        params_complex: [p1] complex tensor of complex parameter values (or None)
+        params_real: [p2] real tensor of real parameter values (or None)
+
+    Returns:
+        du_aug: [F, 2*p1 + p2] complex - augmented Jacobian
+            Columns: [∂u/∂z_1, ..., ∂u/∂z_p1, ∂u/∂z_1*, ..., ∂u/∂z_p1*, ∂u/∂r_1, ..., ∂u/∂r_p2]
+        p1: Number of complex parameters
+        p2: Number of real parameters
+    """
+    p1 = len(params_complex) if params_complex is not None and len(params_complex) > 0 else 0
+    p2 = len(params_real) if params_real is not None and len(params_real) > 0 else 0
+
+    if p1 == 0 and p2 == 0:
+        raise ValueError("Must have at least one parameter")
+
+    # Wrapper that returns [F, 2] real output for autodiff
+    def forward_real_output(z_re, z_im, r):
+        u = forward_fn(z_re, z_im, r)  # [F] complex
+        return torch.stack([u.real, u.imag], dim=-1)  # [F, 2]
+
+    # Setup inputs
+    if p1 > 0:
+        z_re = params_complex.real.clone()
+        z_im = params_complex.imag.clone()
+    else:
+        z_re = torch.tensor([], device=device, dtype=torch.float32)
+        z_im = torch.tensor([], device=device, dtype=torch.float32)
+
+    if p2 > 0:
+        r = params_real.clone()
+    else:
+        r = torch.tensor([], device=device, dtype=torch.float32)
+
+    partials = []
+
+    if p1 > 0:
+        # Jacobian w.r.t. z_re: [F, 2, p1]
+        J_z_re = jacfwd(forward_real_output, argnums=0)(z_re, z_im, r)
+        # Jacobian w.r.t. z_im: [F, 2, p1]
+        J_z_im = jacfwd(forward_real_output, argnums=1)(z_re, z_im, r)
+
+        # Convert to complex: ∂u/∂θ = ∂Re(u)/∂θ + j*∂Im(u)/∂θ
+        du_dz_re = J_z_re[..., 0, :] + 1j * J_z_re[..., 1, :]  # [F, p1]
+        du_dz_im = J_z_im[..., 0, :] + 1j * J_z_im[..., 1, :]  # [F, p1]
+
+        # Wirtinger derivatives
+        du_dz = 0.5 * (du_dz_re - 1j * du_dz_im)       # ∂u/∂z
+        du_dz_conj = 0.5 * (du_dz_re + 1j * du_dz_im)  # ∂u/∂z*
+
+        partials.append(du_dz)        # [F, p1]
+        partials.append(du_dz_conj)   # [F, p1]
+
+    if p2 > 0:
+        # Jacobian w.r.t. r: [F, 2, p2]
+        J_r = jacfwd(forward_real_output, argnums=2)(z_re, z_im, r)
+        du_dr = J_r[..., 0, :] + 1j * J_r[..., 1, :]  # [F, p2]
+        partials.append(du_dr)
+
+    # Stack all partials: [F, 2*p1 + p2]
+    du_aug = torch.cat(partials, dim=-1)
+    return du_aug, p1, p2
+
+
+@torch.no_grad()
+def get_crlb_from_augmented_fim(FIM, p1, p2):
+    """
+    Compute CRLB from augmented complex FIM.
+
+    For complex parameters, returns variance of the complex estimate.
+    For real parameters, returns variance of the real estimate.
+
+    Args:
+        FIM: [2*p1+p2, 2*p1+p2] complex augmented FIM
+        p1: Number of complex parameters
+        p2: Number of real parameters
+
+    Returns:
+        crlb_complex: [p1] real - CRLB for each complex parameter (or None if p1=0)
+        crlb_real: [p2] real - CRLB for each real parameter (or None if p2=0)
+    """
+    p_aug = 2 * p1 + p2
+
+    if p1 == 0:
+        # All real parameters - direct inversion
+        FIM_inv = torch.linalg.pinv(FIM.real + 1e-10 * torch.eye(p2, device=FIM.device))
+        return None, torch.diag(FIM_inv)
+
+    if p2 == 0:
+        # All complex parameters
+        # Use Schur complement: S = A - B @ A*^{-1} @ B*
+        A = FIM[0:p1, 0:p1]
+        B = FIM[0:p1, p1:2*p1]
+        A_conj_inv = torch.linalg.pinv(A.conj() + 1e-10 * torch.eye(p1, device=FIM.device))
+        S = A - B @ A_conj_inv @ B.conj()
+        S_inv = torch.linalg.pinv(S + 1e-10 * torch.eye(p1, device=FIM.device))
+        crlb_complex = torch.diag(S_inv).real
+        return crlb_complex, None
+
+    # Mixed case: full block inversion
+    FIM_inv = torch.linalg.pinv(FIM + 1e-10 * torch.eye(p_aug, device=FIM.device, dtype=FIM.dtype))
+
+    # CRLB for complex params: diagonal of top-left p1×p1 block
+    crlb_complex = torch.diag(FIM_inv[0:p1, 0:p1]).real
+
+    # CRLB for real params: diagonal of bottom-right p2×p2 block
+    crlb_real = torch.diag(FIM_inv[2*p1:p_aug, 2*p1:p_aug]).real
+
+    return crlb_complex, crlb_real
+
+
 if __name__ == '__main__':
     start_time = time.time()
     # Assume network_params is already initialized
@@ -2841,11 +3485,6 @@ if __name__ == '__main__':
     Y_1, Y_2, Y_3, Y_4, Y_5 = compute_true_equivalent_admittance(cable_lengths, load_params)
     # Fit all 5 branches
     fitted = fit_all_equivalent_admittances([Y_1, Y_2, Y_3, Y_4, Y_5])
-    # branch_errors = diagnose_per_branch_error(
-    #     [Y_1, Y_2, Y_3, Y_4, Y_5], 
-    #     fitted, 
-    #     save_path="per_branch_error3.pdf"
-    # )
     # Update network_params with true values
     generate_admittance_parameters(fitted)
     admittance_params = {
@@ -2856,117 +3495,202 @@ if __name__ == '__main__':
         for admittance_name, params in network_params["admittance_parameters"].items()
     }
 
-    # Validate the reduced model
-    # validation_results = validate_reduced_model(
-    #     cable_lengths, 
-    #     load_params, 
-    #     network_params["admittance_parameters"],
-    #     save_path="reduced_model_validation3.pdf"
-    # )
+    # Full parameter space
+    if FORWARD_MODEL == "full":
+        # Turn OFF fault parameter inference
+        for fault_name in network_params["fault_parameters"]:
+            network_params["fault_parameters"][fault_name]["inferred"] = False
+        # Turn OFF admittance parameter inference 
+        for admittance_name, params in network_params["admittance_parameters"].items():
+            for param_name, param_info in params.items():
+                param_info["inferred"] = False
     
-    #plot_nll_vs_ReZF_complex_mtl(cable_lengths, load_params, fault_params, 40)
-    
-    #plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, 40)
-    #rwrwr
+    selected_s1, sorted_keys_s1, sensitivities = perform_load_sensitivity_analysis(
+        load_params, fault_params, cable_lengths, admittance_params,
+        threshold=0.025, scenario="no_fault"
+    )
 
-    # sorted_keys = ["fault_position"]
-    # num_obs = 1
+    # Manually disable redundant parameters
+    # params_to_disable = ["load_15.C_m_leak", "load_17.C_m_leak"]
+    # for param_key in params_to_disable:
+    #     # Set inferred=False in network_params
+    #     parts = param_key.split(".")
+    #     load_name, param_name = parts[0], parts[1]
+    #     network_params["loads"][load_name][param_name]["inferred"] = False
 
+    #     # Remove from selected_s1 and sorted_keys_s1
+    #     if param_key in selected_s1:
+    #         selected_s1.remove(param_key)
+    #     if param_key in sorted_keys_s1:
+    #         idx = sorted_keys_s1.index(param_key)
+    #         sorted_keys_s1.remove(param_key)
+    #         sensitivities.pop(idx)  # Also remove corresponding sensitivity
 
-    # H1_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+    # network_params["cable_lengths"]["l_w_23"]["inferred"] = False
+    # network_params["loads"]["load_17"]["C_m_leak"]["inferred"] = False
+    # network_params["loads"]["load_18"]["C_m_leak"]["inferred"] = False
 
-    # # Add noise
-    # snr_db = 40
-    # snr_lin = 10.0 ** (snr_db / 10.0)
-    # sigpow = torch.mean(torch.abs(H1_clean)**2)
-    # var_f = sigpow / snr_lin
-    # std_f = torch.sqrt(var_f / 2)
+    num_obs = 1
+    params_flat = get_true_param_flat()
+    param_order_list, _ = get_inferred_param_order()
+    cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
+    H_true = calculate_Hnw_nofault(cable_lengths, load_params)  # [F] complex
+    sigpow = torch.mean(torch.abs(H_true)**2)
 
-    # H1_noisy_c = H1_clean + std_f * torch.randn_like(H1_clean.real) + \
-    #                 1j * std_f * torch.randn_like(H1_clean.imag)
-    # H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
-    # H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
+    current_model = model_no_fault
 
-    # current_model = model_with_fault
+    # SNR sweep
+    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    rmse_results = {key: [] for key in selected_s1}
+    crlb_results = {key: [] for key in selected_s1}
 
-    # # Run SVI inference
-    # losses, param_history = run_inference(H1_noisy, current_model, guide, sorted_keys, num_steps=1000)
+    for snr_db in snr_dbs:
+        print(f"\n{'='*50}")
+        print(f"SNR = {snr_db} dB")
+        print('='*50)
 
-
-    # selected_s1, sorted_keys_s1 = perform_load_sensitivity_analysis(
-    #     load_params, fault_params, cable_lengths,
-    #     threshold=0.0, scenario="no_fault"
-    # )
-    
-
-
-    
-    # ========================================================================
-    # RUN INFERENCE BASED ON SCENARIO
-    # ========================================================================
-    print(f"\n[SCENARIO: {SCENARIO}]")
-
-    if SCENARIO == "two_stage":
-        # ----------------------------------------------------------------
-        # TWO-STAGE WORKFLOW
-        # Stage 1: Network identification (no fault) -> infer cable/load params
-        # Stage 2: Fault localization -> use Stage 1 posteriors, infer fault params
-        # ----------------------------------------------------------------
-        stage1_results, stage2_results = run_two_stage_inference(
-            cable_lengths=cable_lengths,
-            load_params = load_params,
-            admittance_params=admittance_params,
-            fault_params=fault_params,
-            snr_db=40,
-            num_steps_stage1=10000,
-            num_steps_stage2=10000,
-            threshold=0.0,
-        )
-        losses_s1, param_history_s1, sorted_keys_s1 = stage1_results
-        losses_s2, param_history_s2, sorted_keys_s2 = stage2_results
-
-    else:
-        # ----------------------------------------------------------------
-        # SINGLE-STAGE WORKFLOW (no_fault or with_fault)
-        # ----------------------------------------------------------------
-        # Run sensitivity analysis
-        selected, sorted_keys = perform_load_sensitivity_analysis(
-            load_params, fault_params, cable_lengths,
-            threshold=0.0, scenario=SCENARIO,
-            admittance_params=admittance_params
-        )
-
-        num_obs = 1
-
-        # Generate observations based on scenario
-        if SCENARIO == "no_fault":
-            H1_clean = calculate_Hnw_nofault(cable_lengths, load_params)
-        else:  # with_fault
-            H1_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
-
-        # Add noise
-        snr_db = 40
         snr_lin = 10.0 ** (snr_db / 10.0)
-        sigpow = torch.mean(torch.abs(H1_clean)**2)
         var_f = sigpow / snr_lin
         std_f = torch.sqrt(var_f / 2)
 
-        H1_noisy_c = H1_clean + std_f * torch.randn_like(H1_clean.real) + \
-                     1j * std_f * torch.randn_like(H1_clean.imag)
+        H1_noisy_c = H_true + std_f * torch.randn_like(H_true.real) + \
+                        1j * std_f * torch.randn_like(H_true.imag)
         H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
         H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
 
-        # Select model based on scenario
-        if SCENARIO == "no_fault":
-            current_model = model_no_fault
-        else:
-            current_model = model_with_fault
+        # CRLB at this SNR
+        crlb_u1u1t_dict, _ = compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities)
 
         # Run SVI inference
-        losses, param_history = run_inference(H1_noisy, current_model, guide, sorted_keys)
+        pyro.clear_param_store()
+        losses, param_history = run_inference(H1_noisy, current_model, guide, sorted_keys_s1, num_steps=500)
 
-        # Plot results
-        plot_param_convergence(param_history, losses, sorted_keys)
-        plot_CI_and_pred_TF(param_history, sorted_keys, H1_clean)
+        # Calculate RMSE
+        rmse_dict = calculate_rmse_per_parameter(param_history, selected_s1, true_normalized_value=0.25)
+        print("rmse_dict", rmse_dict)
+        print("crlb dict", crlb_u1u1t_dict)
+        # Store results
+        for key in selected_s1:
+            if key in rmse_dict and key in crlb_u1u1t_dict:
+                rmse_results[key].append(rmse_dict[key])
+                crlb_results[key].append(crlb_u1u1t_dict[key])  
+
+    # Plot RMSE vs sqrt(CRLB) across SNR for each parameter
+    fig, axes = plt.subplots(3, 4, figsize=(16, 12))
+    axes = axes.flatten()
+
+    for idx, key in enumerate(selected_s1):
+        print("idx", idx)
+        print("key", key)
+        if idx >= len(axes):
+            break
+        ax = axes[idx]
+        ax.plot(snr_dbs, rmse_results[key], 'bo-', label='RMSE', markersize=6)
+        ax.plot(snr_dbs, crlb_results[key], 'r--', label='sqrt(CRLB)', linewidth=2)
+        ax.set_xlabel('SNR (dB)')
+        ax.set_ylabel('Error')
+        ax.set_title(key)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_yscale('log')
+
+    # Hide unused subplots
+    for idx in range(len(sorted_keys_s1), len(axes)):
+        axes[idx].set_visible(False)
+
+    plt.tight_layout()
+    plt.savefig("rmse_vs_crlb_snr_sweep.pdf", dpi=150, bbox_inches='tight')
+    #plt.show()
+
+    print("\nSaved plot to rmse_vs_crlb_snr_sweep.pdf")
+
+
+    # adad
+
+    # # Validate the reduced model
+    # # validation_results = validate_reduced_model(
+    # #     cable_lengths, 
+    # #     load_params, 
+    # #     network_params["admittance_parameters"],
+    # #     save_path="reduced_model_validation3.pdf"
+    # # )
+    
+    # #plot_nll_vs_ReZF_complex_mtl(cable_lengths, load_params, fault_params, 40)
+    
+    # #plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, 40)
+
+    # # sorted_keys = ["fault_position"]
+
+    
+
+
+    
+    # # ========================================================================
+    # # RUN INFERENCE BASED ON SCENARIO
+    # # ========================================================================
+    # print(f"\n[SCENARIO: {SCENARIO}]")
+
+    # if SCENARIO == "two_stage":
+    #     # ----------------------------------------------------------------
+    #     # TWO-STAGE WORKFLOW
+    #     # Stage 1: Network identification (no fault) -> infer cable/load params
+    #     # Stage 2: Fault localization -> use Stage 1 posteriors, infer fault params
+    #     # ----------------------------------------------------------------
+    #     stage1_results, stage2_results = run_two_stage_inference(
+    #         cable_lengths=cable_lengths,
+    #         load_params = load_params,
+    #         admittance_params=admittance_params,
+    #         fault_params=fault_params,
+    #         snr_db=40,
+    #         num_steps_stage1=500,
+    #         num_steps_stage2=500,
+    #         threshold=0.0,
+    #     )
+    #     losses_s1, param_history_s1, sorted_keys_s1 = stage1_results
+    #     losses_s2, param_history_s2, sorted_keys_s2 = stage2_results
+
+    # else:
+    #     # ----------------------------------------------------------------
+    #     # SINGLE-STAGE WORKFLOW (no_fault or with_fault)
+    #     # ----------------------------------------------------------------
+    #     # Run sensitivity analysis
+    #     selected, sorted_keys = perform_load_sensitivity_analysis(
+    #         load_params, fault_params, cable_lengths,
+    #         threshold=0.0, scenario=SCENARIO,
+    #         admittance_params=admittance_params
+    #     )
+
+    #     num_obs = 1
+
+    #     # Generate observations based on scenario
+    #     if SCENARIO == "no_fault":
+    #         H1_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+    #     else:  # with_fault
+    #         H1_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+
+    #     # Add noise
+    #     snr_db = 40
+    #     snr_lin = 10.0 ** (snr_db / 10.0)
+    #     sigpow = torch.mean(torch.abs(H1_clean)**2)
+    #     var_f = sigpow / snr_lin
+    #     std_f = torch.sqrt(var_f / 2)
+
+    #     H1_noisy_c = H1_clean + std_f * torch.randn_like(H1_clean.real) + \
+    #                  1j * std_f * torch.randn_like(H1_clean.imag)
+    #     H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
+    #     H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
+
+    #     # Select model based on scenario
+    #     if SCENARIO == "no_fault":
+    #         current_model = model_no_fault
+    #     else:
+    #         current_model = model_with_fault
+
+    #     # Run SVI inference
+    #     losses, param_history = run_inference(H1_noisy, current_model, guide, sorted_keys)
+
+    #     # Plot results
+    #     plot_param_convergence(param_history, losses, sorted_keys)
+    #     plot_CI_and_pred_TF(param_history, sorted_keys, H1_clean)
 
     print("My program took", time.time() - start_time, "to run")

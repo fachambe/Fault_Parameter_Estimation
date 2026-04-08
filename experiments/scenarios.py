@@ -219,19 +219,26 @@ def main(cfg_path="configs/benchmark.yaml"):
                                      force=cfg["force"], desired_freq=pul_freq[idx], estimate=estimate, split="test")
         h_obs = torch.tensor(test["h_obs_real"], device=device) + 1j*torch.tensor(test["h_obs_imag"], device=device)  # [M,F]
         var = torch.tensor(test["noise_var"], device=device)   # [M,F]
-
-        preds_mle = est1.predict2(h_obs, var)
-        rmse_mle = rmse_joint(preds_mle, test)
-        print("RMSE from MLE", rmse_mle)
+        print("h_obs shape", h_obs.shape)
+        # preds_mle = est1.predict2(h_obs, var)
+        # rmse_mle = rmse_joint(preds_mle, test)
+        # print("RMSE from MLE", rmse_mle)
         
-        preds_elbo = est2.predict(h_obs, var, snr_db)
-        rmse_elbo = rmse_joint(preds_elbo, test)
-        print("RMSE from SVI", rmse_elbo)
+        # preds_elbo = est2.predict(h_obs, var, snr_db)
+        # rmse_elbo = rmse_joint(preds_elbo, test)
+        # print("RMSE from SVI", rmse_elbo)
         
         
 
         du_aug = complex_partials_fullbatch(fm, test, device)   # [N, F, 5] complex
         FIM = fim_from_complex_jac(du_aug, var) # [N, 5, 5] Augmented FIM matrix
+
+        eigvals = torch.linalg.eigvalsh(FIM)
+        print("eigvals", eigvals)
+        min_eigval = eigvals.min().item()
+
+        print("min_eigval", min_eigval)
+        ada
         # CRLB = torch.linalg.inv(FIM)
         # CRLB_ZF_from_inv = CRLB[:, 0, 0] #[N] CRLBs for L1
         # CRLB_ZL_from_inv = CRLB[:, 1, 1] #[N] CRLBs for L1
@@ -336,7 +343,7 @@ def main(cfg_path="configs/benchmark.yaml"):
 
 if __name__ == "__main__":
     # Plot gamma vs frequency
-    plot_gamma_vs_frequency()
+    # plot_gamma_vs_frequency()
 
     # Uncomment to run main benchmarks
-    #main()
+    main()
