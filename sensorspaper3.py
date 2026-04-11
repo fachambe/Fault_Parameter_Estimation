@@ -1937,61 +1937,41 @@ def extract_posterior_means(param_history, num_samples=2048):
     return posterior_means
 
 
-def calculate_rmse_per_parameter(param_history, sorted_keys, true_normalized_value=0.25, num_samples=2048):
+def calculate_rmse_from_trials(posterior_means_list, sorted_keys, true_normalized_value=0.25):
     """
-    Calculate RMSE (error) for each parameter comparing posterior mean to true value.
-    Only includes parameters in sorted_keys, returned in that order.
+    Calculate RMSE across M Monte Carlo trials.
 
     Args:
-        param_history: dict of parameter trajectories from SVI
+        posterior_means_list: list of M dicts, each dict from extract_posterior_means()
         sorted_keys: list of parameter names to include (in desired order)
         true_normalized_value: true value in normalized [0,1] space (default 0.25)
-        num_samples: number of MC samples for computing posterior mean
 
     Returns:
-        dict: {param_name: error} in sorted_keys order
+        dict: {param_name: RMSE} in sorted_keys order
     """
-    posterior_means = extract_posterior_means(param_history, num_samples)
+    M = len(posterior_means_list)
+    if M == 0:
+        return {}
 
     rmse_dict = {}
     for key in sorted_keys:
         # Convert key format: sorted_keys uses dots, posterior_means uses underscores
         posterior_key = key.replace(".", "_")
-        if posterior_key in posterior_means:
-            rmse_dict[key] = abs(posterior_means[posterior_key] - true_normalized_value)
+
+        # Collect estimates across M trials
+        estimates = []
+        for posterior_means in posterior_means_list:
+            if posterior_key in posterior_means:
+                estimates.append(posterior_means[posterior_key])
+
+        if estimates:
+            # MSE = mean of squared errors across M trials
+            squared_errors = [(est - true_normalized_value)**2 for est in estimates]
+            mse = sum(squared_errors) / len(squared_errors)
+            rmse_dict[key] = math.sqrt(mse)
 
     return rmse_dict
 
-
-def print_rmse_table(rmse_results, sorted_keys=None):
-    """
-    Print a formatted table of RMSE results.
-
-    Args:
-        rmse_results: dict from calculate_rmse_per_parameter()
-        sorted_keys: optional list of parameter names to control print order
-    """
-    print("\n" + "=" * 80)
-    print(f"{'Parameter':<30} {'Post. Mean':<12} {'True':<8} {'Error':<12} {'Sq. Error':<12}")
-    print("-" * 80)
-
-    per_param = rmse_results['per_parameter']
-
-    if sorted_keys:
-        # Print in specified order, only for params that exist
-        keys_to_print = [k for k in sorted_keys if k in per_param]
-    else:
-        # Print all in alphabetical order
-        keys_to_print = sorted(per_param.keys())
-
-    for param_name in keys_to_print:
-        info = per_param[param_name]
-        print(f"{param_name:<30} {info['mean']:<12.4f} {0.25:<8.2f} {info['error']:<12.4f} {info['squared_error']:<12.6f}")
-
-    print("-" * 80)
-    print(f"{'Overall MSE:':<30} {rmse_results['overall_mse']:.6f}")
-    print(f"{'Overall RMSE:':<30} {rmse_results['overall_rmse']:.6f}")
-    print("=" * 80)
 
 
 
@@ -2204,7 +2184,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
     else:
         raise ValueError(f"Unknown optimizer: {OPTIMIZER}. Use 'Adam' or 'Adagrad'.")
 
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
     top_20_most_sensitive = [
         key.replace(".", "_") + "_loc"
         for key in sorted_keys[:20]
@@ -2216,25 +2196,27 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
     guide(H1_noisy)
 
     # Save initial parameter values
-    param_store = pyro.get_param_store()
-    for name, value in param_store.items():
-        param_history[name].append(value.detach().item())
+    # param_store = pyro.get_param_store()
+    # for name, value in param_store.items():
+    #     param_history[name].append(value.detach().item())
 
     for step in range(num_steps):
         loss = svi.step(H1_noisy)
         losses.append(loss)
 
-        param_store = pyro.get_param_store()
-        for name, value in param_store.items():
-            param_history[name].append(value.detach().item())
+        # param_store = pyro.get_param_store()
+        # for name, value in param_store.items():
+        #     param_history[name].append(value.detach().item())
         
-        if step % 25 == 0 or step == 0:
+        if step % 100 == 0 or step == 0:
             print(f"\n===== Step {step} | ELBO: {loss:.6f} =====")
             print("\n Top 20 Most Sensitive Parameters")
             for key in top_20_most_sensitive:
                 if key in param_store:
                     print(f"{key:40s} (sigmoid) = {torch.sigmoid(param_store[key])} | True value = 0.25")
-        
+    param_store = pyro.get_param_store()
+    for name, value in param_store.items():
+        param_history[name] = [value.detach().item()]  # Single value
     print("Inference complete.")
     return losses, param_history
 
@@ -3135,14 +3117,14 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     eigvals2, eigvecs2 = torch.linalg.eigh(I2) 
     dimension2 = I2.shape[0]
     rank2 = torch.linalg.matrix_rank(I2)
-    print("Rank of Normalized FIM", rank2)
+    #print("Rank of Normalized FIM", rank2)
     singular2 = rank2 < dimension2
-    print("Normalized FIM is singular?", singular2)
-    print("Eigvals of Normalized FIM (descending)", torch.sort(eigvals2, descending=True).values)
+    #print("Normalized FIM is singular?", singular2)
+    #print("Eigvals of Normalized FIM (descending)", torch.sort(eigvals2, descending=True).values)
 
     U, S, Vh = torch.linalg.svd(I2)
     
-    print("Singular values of Normalized FIM (descending)", torch.sort(S, descending=True).values)
+    #print("Singular values of Normalized FIM (descending)", torch.sort(S, descending=True).values)
 
     eps = torch.finfo(I2.dtype).eps
     rtol = max(I2.shape[-2], I2.shape[-1]) * eps
@@ -3151,19 +3133,19 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     num_zeroed = (S <= tol).sum().item()
     num_kept = (S > tol).sum().item()
 
-    print(f"eps       = {eps:.3e}")
-    print(f"rtol      = {rtol:.3e}")
-    print(f"sigma_max = {S.max().item():.3e}")
-    print(f"tol       = {tol.item():.3e}")
-    print(f"zeroed    = {num_zeroed}")
-    print(f"kept      = {num_kept}")
+    #print(f"eps       = {eps:.3e}")
+    #print(f"rtol      = {rtol:.3e}")
+    #print(f"sigma_max = {S.max().item():.3e}")
+    #print(f"tol       = {tol.item():.3e}")
+    #print(f"zeroed    = {num_zeroed}")
+    #print(f"kept      = {num_kept}")
     
     # Diagnostic: parameter sensitivities
     J_flat = J.reshape(-1, J.shape[-1])  # [F*2, P]
     param_sensitivity = torch.abs(J_flat).max(dim=0).values
 
-    print(f"Jacobian range: [{param_sensitivity.min():.2e}, {param_sensitivity.max():.2e}]")
-    print(f"Ratio: {param_sensitivity.max()/param_sensitivity.min():.2e}")
+    #print(f"Jacobian range: [{param_sensitivity.min():.2e}, {param_sensitivity.max():.2e}]")
+    #print(f"Ratio: {param_sensitivity.max()/param_sensitivity.min():.2e}")
 
     tol = 1e-8
     mask = eigvals2 > tol
@@ -3175,23 +3157,22 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     J_pinv = U1 @ torch.diag(1.0 / Lambda1) @ U1.T
     J_pinv_torch = torch.linalg.pinv(I2)
     #Sanity check they should be equal
-    print("max |manual pinv - torch pinv| =", torch.max(torch.abs(J_pinv - J_pinv_torch)).item())
+    #print("max |manual pinv - torch pinv| =", torch.max(torch.abs(J_pinv - J_pinv_torch)).item())
 
     
     S2, keep_indices = build_S2_from_nullspace(U2, tol=1e-8)
 
-    print("keep_indices =", keep_indices)
-    print("param order", param_order_list)
-    print("S2 shape =", S2.shape)
-    print("S2 =\n", S2)
+    # print("keep_indices =", keep_indices)
+    # print("param order", param_order_list)
+    # print("S2 shape =", S2.shape)
+    # print("S2 =\n", S2)
     
     SU2 = S2 @ U2
-    print("S2 @ U2 =\n", SU2)
-    print("||S2 @ U2||_F =", torch.linalg.norm(SU2).item())
-    print("max |S2 @ U2| =", torch.max(torch.abs(SU2)).item())
+    # print("S2 @ U2 =\n", SU2)
+    # print("||S2 @ U2||_F =", torch.linalg.norm(SU2).item())
+    # print("max |S2 @ U2| =", torch.max(torch.abs(SU2)).item())
 
 
-    CRLB_U1T = 1.0 / Lambda1
     CRLB_U1U1T = torch.diag(J_pinv)
     CRLB_S2 = torch.diag(S2 @ J_pinv @ S2.T)
 
@@ -3214,9 +3195,9 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     key_to_idx = {param_order_to_key(param_order_list[i]): i for i in range(len(param_order_list))}
 
 
-    print("="*220)
-    print(f"{'Idx':<5} {'Parameter':<22} {'Sens':<10} {'CRLB S2':<14} {'Unc S2':<10} {'CRLB U1U1T':<14} {'Unc U1U1T':<10}")
-    print("-"*220)
+    # print("="*220)
+    # print(f"{'Idx':<5} {'Parameter':<22} {'Sens':<10} {'CRLB S2':<14} {'Unc S2':<10} {'CRLB U1U1T':<14} {'Unc U1U1T':<10}")
+    # print("-"*220)
 
     # Build dicts sorted by sorted_keys_s1 order
     crlb_u1u1t_dict = {}  # key -> CRLB value
@@ -3229,12 +3210,12 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
         i = key_to_idx[key]
         sens = sensitivities[index]
         crlb_u1u1t = CRLB_U1U1T[i].item()
-        crlb_u1u1t_dict[key] = math.sqrt(crlb_u1u1t)
+        crlb_u1u1t_dict[key] = crlb_u1u1t
         uncert_u1u1t_pct = math.sqrt(crlb_u1u1t) * 100
         if i in keep_indices:
             s2_idx = keep_indices.index(i)
             crlb_s2 = CRLB_S2[s2_idx].item()
-            crlb_s2_dict[key] = math.sqrt(crlb_s2)
+            crlb_s2_dict[key] = crlb_s2
             uncert_s2_pct = math.sqrt(crlb_s2) * 100
             crlb_s2_str = f"{crlb_s2:.2e}"
             uncert_s2_str = f"{uncert_s2_pct:.2f}%"
@@ -3242,9 +3223,9 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
             crlb_s2_str = "N/A"
             uncert_s2_str = "N/A"
 
-        print(f"{i:<5} {key:<22} {sens:<10}  {crlb_s2_str:<14} {uncert_s2_str:<10} {crlb_u1u1t:<14.2e} {uncert_u1u1t_pct:>5.2f}%")
+        # print(f"{i:<5} {key:<22} {sens:<10}  {crlb_s2_str:<14} {uncert_s2_str:<10} {crlb_u1u1t:<14.2e} {uncert_u1u1t_pct:>5.2f}%")
 
-    print("="*220)
+    # print("="*220)
     return crlb_u1u1t_dict, crlb_s2_dict
 
     
@@ -3539,6 +3520,9 @@ if __name__ == '__main__':
 
     current_model = model_no_fault
 
+    # Monte Carlo configuration
+    M = 100 # Number of Monte Carlo trials per SNR (set to 1 for single trial, 10+ for full MC)
+
     # SNR sweep
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
@@ -3553,56 +3537,70 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin
         std_f = torch.sqrt(var_f / 2)
 
-        H1_noisy_c = H_true + std_f * torch.randn_like(H_true.real) + \
-                        1j * std_f * torch.randn_like(H_true.imag)
-        H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
-        H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
+        # CRLB at this SNR (computed once per SNR, same for all trials)
+        crlb_u1u1t_dict, _ = compute_real_FIM_and_CRLB(var_f, selected_s1, sensitivities)
 
-        # CRLB at this SNR
-        crlb_u1u1t_dict, _ = compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities)
+        # Run M Monte Carlo trials at this SNR
+        posterior_means_list = []
+        for trial in range(M):
+            if M > 1:
+                print(f"  Trial {trial+1}/{M}")
 
-        # Run SVI inference
-        pyro.clear_param_store()
-        losses, param_history = run_inference(H1_noisy, current_model, guide, sorted_keys_s1, num_steps=500)
+            # Generate noisy observation (different noise each trial)
+            H1_noisy_c = H_true + std_f * torch.randn_like(H_true.real) + \
+                            1j * std_f * torch.randn_like(H_true.imag)
+            H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
+            H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
 
-        # Calculate RMSE
-        rmse_dict = calculate_rmse_per_parameter(param_history, selected_s1, true_normalized_value=0.25)
-        print("rmse_dict", rmse_dict)
-        print("crlb dict", crlb_u1u1t_dict)
-        # Store results
+            # Run SVI inference
+            pyro.clear_param_store()
+            losses, param_history = run_inference(H1_noisy, current_model, guide, selected_s1, num_steps=300)
+
+            # Extract posterior means for this trial
+            posterior_means = extract_posterior_means(param_history, num_samples=2048) #dict of {paramname, posterior mean value} for all params
+            posterior_means_list.append(posterior_means)
+
+        # Calculate RMSE across M trials
+        rmse_dict = calculate_rmse_from_trials(posterior_means_list, selected_s1, true_normalized_value=0.25)
+
+        print(f"RMSE (M={M}):", {k: f"{v:.4f}" for k, v in rmse_dict.items()})
+        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+
+        # Store results for plotting
         for key in selected_s1:
             if key in rmse_dict and key in crlb_u1u1t_dict:
                 rmse_results[key].append(rmse_dict[key])
-                crlb_results[key].append(crlb_u1u1t_dict[key])  
+                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
 
     # Plot RMSE vs sqrt(CRLB) across SNR for each parameter
     fig, axes = plt.subplots(3, 4, figsize=(16, 12))
     axes = axes.flatten()
 
     for idx, key in enumerate(selected_s1):
-        print("idx", idx)
-        print("key", key)
         if idx >= len(axes):
             break
         ax = axes[idx]
-        ax.plot(snr_dbs, rmse_results[key], 'bo-', label='RMSE', markersize=6)
+        ax.plot(snr_dbs, rmse_results[key], 'bo-', label=f'RMSE (M={M})', markersize=6)
         ax.plot(snr_dbs, crlb_results[key], 'r--', label='sqrt(CRLB)', linewidth=2)
         ax.set_xlabel('SNR (dB)')
         ax.set_ylabel('Error')
-        ax.set_title(key)
+        ax.set_title(key, fontsize=10)
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
         ax.set_yscale('log')
 
     # Hide unused subplots
-    for idx in range(len(sorted_keys_s1), len(axes)):
+    for idx in range(len(selected_s1), len(axes)):
         axes[idx].set_visible(False)
 
+    fig.suptitle(f'RMSE vs sqrt(CRLB) - SNR Sweep (M={M} trials per SNR)', fontsize=14, y=0.995)
     plt.tight_layout()
-    plt.savefig("rmse_vs_crlb_snr_sweep.pdf", dpi=150, bbox_inches='tight')
+
+    filename = f"rmse_vs_crlb_snr_sweep_M{M}.pdf"
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
     #plt.show()
 
-    print("\nSaved plot to rmse_vs_crlb_snr_sweep.pdf")
+    print(f"\nSaved plot to {filename}")
 
 
     # adad
