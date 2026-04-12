@@ -1973,9 +1973,6 @@ def calculate_rmse_from_trials(posterior_means_list, sorted_keys, true_normalize
     return rmse_dict
 
 
-
-
-
 def update_network_params_from_posterior(posterior_means):
     """
     Update network_params with inferred posterior means from Stage 1.
@@ -2211,6 +2208,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
         if step % 100 == 0 or step == 0:
             print(f"\n===== Step {step} | ELBO: {loss:.6f} =====")
             print("\n Top 20 Most Sensitive Parameters")
+            param_store = pyro.get_param_store()
             for key in top_20_most_sensitive:
                 if key in param_store:
                     print(f"{key:40s} (sigmoid) = {torch.sigmoid(param_store[key])} | True value = 0.25")
