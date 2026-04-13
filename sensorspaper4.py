@@ -1144,6 +1144,28 @@ def update_network_params_from_posterior(posterior_means):
 
     print(f"\nUpdated {updated_count} parameters from Stage 1 posterior means.")
 
+def set_network_params_from_normalized(sampled_theta, param_order_list):
+    """
+    Update network_params with sampled theta. Used to calculate Bayesian CLRB.
+    Args:
+        sampled_theta: Sampled tensor of theta of shape [p]
+        param_order_list: List of selected_keys like ["load_1.C_mleak, etc.]
+    """
+    counter = 0
+    for params in param_order_list: 
+        if params[0] == "load":
+            entity_name = params[1]
+            param_name = params[2]
+            min, max = network_params["loads"][entity_name][param_name]["range"]
+            network_params["loads"][entity_name][param_name]["value"] = denormalize(sampled_theta[counter], min, max).item()
+            counter = counter + 1
+        else: 
+            cable_name = params[1]
+            min, max = network_params["cable_lengths"][cable_name]["infer_range"]
+            network_params["cable_lengths"][cable_name]["value"] = denormalize(sampled_theta[counter], min, max).item()
+            counter = counter + 1    
+
+
 
 def calculate_rmse_from_trials(posterior_means_list, sorted_keys, true_normalized_value=0.25):
     """
@@ -1386,6 +1408,7 @@ def get_inferred_param_order():
         param_order: List of tuples describing each parameter:
             - ("cable", cable_name, None) for cable lengths
             - ("load", load_name, param_name) for load parameters
+        
         num_params: Total number of inferred parameters
     """
     param_order = []
@@ -1481,26 +1504,19 @@ def build_S2_from_nullspace(U2, tol=1e-8):
 
     S2 = torch.eye(p, dtype=U2.dtype, device=U2.device)[keep_mask]
     return S2, keep_indices
-
-def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
+def compute_real_FIM(var_f):
     """
-    g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately)
-    P = number of parameters (inputs)
-    F = number of frequencies (outputs)
-    Compute Real Fisher Information Matrix and CRLB for P inferred real parameters.
-    Note FIM and CRLB are normalized here. 
-    Uses float64 precision for numerical stability.
-
+    g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately) \\
+    P = number of parameters (inputs) \\
+    F = number of frequencies (outputs) \\
+    Compute Real Fisher Information Matrix for normalized theta in [0, 1]
     Args:
         var_f: Noise variance (determined by SNR) [] if white noise (constant)
         or [F] if frequency dependent
     Returns:
-        CRLB_U1U1T: [P] Dict of sqrt Cramér-Rao Lower Bounds for alpha = U1U1^T theta
-        CRLB_S2: Dict of sqrt Cramér-Rao Lower Bounds for alpha = S2 theta
+        I2_scaled: FIM [p, p] in param_order_list order
     """
-    param_order_list, _ = get_inferred_param_order()
-
-    # Use float64 for CRLB computation (better numerical precision)
+    # Use float64 for FIM/CLRB computation (better numerical precision)
     params_flat = get_true_param_flat().double()
     var_f_64 = var_f.double() if isinstance(var_f, torch.Tensor) else torch.tensor(var_f, dtype=torch.float64)
 
@@ -1516,7 +1532,7 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     # Compute Jacobian dH/dtheta in float64
     J = jacfwd(H_nofault_wrapper_f64)(params_flat)  # [F, 2, P]
 
-    # Build scaling vector s_p = d theta_p / d phi_p
+    # Build scaling/reparamterization jacobian s_p = d theta_p / d phi_p
     scale_list = [] #[P]
 
     # Cable lengths
@@ -1550,32 +1566,26 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     # FIM should be real - take real part (imag should be ~0 due to numerics)
     I = ((1 / var_f_64) * I_f.sum(dim=0)).real  # [P, P] real and should be symmetric + PSD
     I2 = D.T @ I @ D
+    return I2
 
-    # #Unnormalized FIM
-    # eigvals, eigvecs = torch.linalg.eigh(I)
-    # rank = torch.linalg.matrix_rank(I)
-    # print("Rank of FIM", rank)
-    # dimension = I.shape[0]
-    # singular = rank < dimension
-    # print("FIM is singular?", singular)
-    # print("Eigvals of FIM (descending)", torch.sort(eigvals, descending=True).values)
-    # U, S, Vh = torch.linalg.svd(I)
-    # print("Singular values of FIM(descending)", torch.sort(S, descending=True).values)
+def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
+    """
+    g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately) \\
+    P = number of parameters (inputs) \\
+    F = number of frequencies (outputs) \\
+    Compute Real Fisher Information Matrix and CRLB for P inferred real parameters. \\
+    Note FIM and CRLB are normalized here. \\
+    Uses float64 precision for numerical stability. 
 
-    # eps = torch.finfo(I2.dtype).eps
-    # rtol = max(I2.shape[-2], I2.shape[-1]) * eps
-    # tol = rtol * S.max()           # since default atol = 0
-
-    # num_zeroed = (S <= tol).sum().item()
-    # num_kept = (S > tol).sum().item()
-
-    # print(f"eps       = {eps:.3e}")
-    # print(f"rtol      = {rtol:.3e}")
-    # print(f"sigma_max = {S.max().item():.3e}")
-    # print(f"tol       = {tol.item():.3e}")
-    # print(f"zeroed    = {num_zeroed}")
-    # print(f"kept      = {num_kept}")
-
+    Args:
+        var_f: Noise variance (determined by SNR) [] if white noise (constant)
+        or [F] if frequency dependent
+    Returns:
+        CRLB_U1U1T: [P] Dict of Cramér-Rao Lower Bounds for alpha = U1U1^T theta
+        CRLB_S2: [] depends on span of null space but will be < P. Dict of Cramér-Rao Lower Bounds for alpha = S2 theta
+    """
+    param_order_list, _ = get_inferred_param_order()
+    I2 = compute_real_FIM(var_f)
     #Normalized FIM
     eigvals2, eigvecs2 = torch.linalg.eigh(I2) 
     dimension2 = I2.shape[0]
@@ -1604,8 +1614,8 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     #print(f"kept      = {num_kept}")
     
     # Diagnostic: parameter sensitivities
-    J_flat = J.reshape(-1, J.shape[-1])  # [F*2, P]
-    param_sensitivity = torch.abs(J_flat).max(dim=0).values
+    # J_flat = J.reshape(-1, J.shape[-1])  # [F*2, P]
+    # param_sensitivity = torch.abs(J_flat).max(dim=0).values
 
     #print(f"Jacobian range: [{param_sensitivity.min():.2e}, {param_sensitivity.max():.2e}]")
     #print(f"Ratio: {param_sensitivity.max()/param_sensitivity.min():.2e}")
@@ -1691,9 +1701,144 @@ def compute_real_FIM_and_CRLB(var_f, sorted_keys_s1, sensitivities):
     # print("="*220)
     return crlb_u1u1t_dict, crlb_s2_dict
 
+############Bayesian CRLB############
+def beta_prior_fim_closed_form(p, alpha):
+    """Closed form prior FIM for Beta(α,α) priors."""
+    if alpha <= 2:
+        raise ValueError("alpha must be > 2 for finite FIM")
+    
+    j_pi_scalar = 2 * (2*alpha - 1) * (2*alpha - 2) / (alpha - 2)
+    J_pi = j_pi_scalar * torch.eye(p)  # Diagonal
+    return J_pi
+def compute_prior_fim_beta_mc(alpha, p, num_samples=100000):
+    """
+    Monte Carlo estimate of prior FIM for Beta(α,α).
+    Works even for α < 2 where closed form diverges.
+    """
+    eps = 1e-8  # Small regularization to avoid exact 0 or 1
+    # Sample from prior
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    theta_samples = beta_dist.sample((num_samples, p))
+    # Clamp to avoid numerical issues
+    theta_samples = torch.clamp(theta_samples, eps, 1-eps)
+    # Compute score: ∇ log λ(θ)
+    score = (alpha - 1) / theta_samples - (alpha - 1) / (1 - theta_samples)  # [num_samples, p]
+    # Compute J_π = E[score @ score^T]
+    J_p = torch.zeros(p, p)
+    for i in range(num_samples):
+        #score_i = score[i].unsqueeze(1)  # [p, 1]
+        score_i_vec = score[i]  # [p]
+        J_p += torch.diag(score_i_vec ** 2)  # Diagonal outer product
+        #J_p += score_i @ score_i.T
+    J_p /= num_samples
+    return J_p
 
+def compute_expected_data_fim(p, snr_db, param_order_list, alpha, num_samples=100):
+    """
+    Compute E_π[I(θ)] via Monte Carlo.
+    
+    Returns:
+        E_I: Expected data FIM [p, p]
+    """
+    snr_lin = 10.0 ** (snr_db / 10.0)
 
-if __name__ == '__main__':
+    # Sample parameter values from prior
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    theta_samples = beta_dist.sample((num_samples, p))  # [num_samples, p]    
+    # Accumulate FIMs
+    E_I = torch.zeros(p, p)
+
+    for m in range(num_samples):
+        print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
+        set_network_params_from_normalized(theta_samples[m], param_order_list)
+
+        # Compute H_clean for this θ
+        cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
+        H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+        
+        # Compute var_f for THIS θ
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+        var_f = sigpow / snr_lin
+
+        # Compute FIM at this theta
+        I_phi = compute_real_FIM(var_f) 
+        
+        E_I += I_phi
+    
+    E_I /= num_samples
+    return E_I
+
+# Convert selected_s1 keys to param_order_list tuple format
+def key_to_tuple(key):
+    """Convert 'l_w_4' or 'load_1.C_m_leak' to tuple format."""
+    if '.' in key:
+        # Load parameter: 'load_1.C_m_leak' → ('load', 'load_1', 'C_m_leak')
+        parts = key.split('.')
+        return ('load', parts[0], parts[1])
+    else:
+        # Cable parameter: 'l_w_4' → ('cable', 'l_w_4', None)
+        return ('cable', key, None)
+
+def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
+    """
+    Compute Bayesian MSE via Monte Carlo at specific SNR. 
+    
+    For each trial:
+      1. Sample θ_true ~ Beta(α, α)
+      2. Generate data y ~ p(y|θ_true)
+      3. Run SVI to get estimate θ̂
+      4. Compute (θ̂ - θ_true)²
+    
+    Returns:
+        bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
+    """
+    param_order_list, p = get_inferred_param_order()
+    squared_errors = {key: [] for key in selected_s1}
+    snr_lin = 10.0 ** (snr_db / 10.0)
+
+    for m in range(M):
+        print(f"Trial {m+1}/{M}")
+        
+        # 1. Sample true theta from prior
+        beta_dist = torch.distributions.Beta(alpha, alpha)
+        theta_true_normalized = beta_dist.sample((p,))
+
+        # 2. Set network_params to this sampled theta
+        set_network_params_from_normalized(theta_true_normalized, param_order_list)
+
+        # 3. Generate clean signal from this theta
+        cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
+        H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+        var_f = sigpow / snr_lin
+        std_f = torch.sqrt(var_f / 2)
+        H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
+                     1j * std_f * torch.randn_like(H_clean.imag)
+        H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
+        # 4. Run SVI to get estimate
+        pyro.clear_param_store()
+        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, num_steps=300)
+        
+        # 5. Extract posterior mean
+        posterior_means = extract_posterior_means(param_history)
+
+        # 6. Compute squared errors vs sampled true θ
+        for key in selected_s1:
+            key_tuple = key_to_tuple(key)
+            idx = param_order_list.index(key_tuple)
+            true_val = theta_true_normalized[idx].item()
+            
+            posterior_key = key.replace(".", "_")
+            if posterior_key in posterior_means:
+                estimate = posterior_means[posterior_key]
+                squared_errors[key].append((estimate - true_val)**2)
+    
+    # Average squared errors
+    bayesian_mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
+    
+    return bayesian_mse_dict
+        
+if __name__ == '__main__':  
     start_time = time.time()
     # Assume network_params is already initialized
     #total_params, load_types = generate_load_parameters(num_loads, omega)
@@ -1705,20 +1850,7 @@ if __name__ == '__main__':
     print(f"Total number of fault parameters: {num_fault_params}")
     print(f"Total number of network parameters: {total_params + num_cable_params + num_fault_params}")
     print(f"Load type distribution: {load_types}")
-    # Turn off inference for ALL parameters except fault_position
-    # for load_name, params in network_params["loads"].items():
-    #     for param_name in params:
-    #         network_params["loads"][load_name][param_name]["inferred"] = False
-    # for cable_name in network_params["cable_lengths"]:
-    #     network_params["cable_lengths"][cable_name]["inferred"] = False
-    # network_params["fault_parameters"]["fault_position"]["inferred"] = True
-    # network_params["fault_parameters"]["Z_fault_real"]["inferred"] = False
-    # network_params["fault_parameters"]["Z_fault_imag"]["inferred"] = False
-    # print("\n[CONFIG] Only inferring fault_position (all other params fixed)")
 
-    #plot_gamma_vs_frequency_complex()
-    
-    #plot_nll_vs_L1_simple_mtl(snr_db=40, L1_true=25.0, L_total=100.0)
     cable_lengths = {
         key: torch.tensor(val["value"], device=device) for key, val in network_params["cable_lengths"].items()
     }
@@ -1734,19 +1866,18 @@ if __name__ == '__main__':
         key: torch.tensor(val["value"], device=device) for key, val in network_params["fault_parameters"].items()
     }
 
-        # Turn OFF fault parameter inference for stage 1
+    # Turn OFF fault parameter inference for stage 1
     for fault_name in network_params["fault_parameters"]:
         network_params["fault_parameters"][fault_name]["inferred"] = False
-
 
     selected_s1, sorted_keys_s1, sensitivities = perform_load_sensitivity_analysis(
         load_params, fault_params, cable_lengths,
         threshold=0.025, scenario="no_fault"
     )
-
+    #Initial H_true with theta = 0.25
     num_obs = 1
     params_flat = get_true_param_flat()
-    param_order_list, _ = get_inferred_param_order()
+    param_order_list, p = get_inferred_param_order()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
     H_true = calculate_Hnw_nofault(cable_lengths, load_params)  # [F] complex
     sigpow = torch.mean(torch.abs(H_true)**2)
@@ -1754,58 +1885,55 @@ if __name__ == '__main__':
     current_model = model_no_fault
 
     # Monte Carlo configuration
-    M = 1 # Number of Monte Carlo trials per SNR (set to 1 for single trial, 10+ for full MC)
-
-    # SNR sweep
-    #snr_dbs = [40]
+    M = 100 # Number of Monte Carlo trials per SNR (set to 1 for single trial, 10+ for full MC)
+    alpha = 1.1
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
+
+    bayesian_rmse_results = {key: [] for key in selected_s1}
+    bayesian_crlb_results = {key: [] for key in selected_s1}
+
+    J_pi = compute_prior_fim_beta_mc(alpha, p) #not dep on SNR move out of loop
 
     for snr_db in snr_dbs:
         print(f"\n{'='*50}")
         print(f"SNR = {snr_db} dB")
         print('='*50)
 
-        snr_lin = 10.0 ** (snr_db / 10.0)
-        var_f = sigpow / snr_lin
-        std_f = torch.sqrt(var_f / 2)
-        # CRLB at this SNR (computed once per SNR, same for all trials)
-        crlb_u1u1t_dict, _ = compute_real_FIM_and_CRLB(var_f, selected_s1, sensitivities)
+        # Bayesian CLRB R(\phi_n, \pi) \succeq (E_{\pi} [C(\theta)]) J_B^{-1} (E_{\pi}[C(\theta)]^T)
+        E_I = compute_expected_data_fim(p, snr_db, param_order_list, alpha, M)
+        J_B = E_I + J_pi 
+        BCRLB = torch.linalg.inv(J_B)
+        # BCRLB2 = torch.linalg.inv(E_I)
+        bcrlb_diag_full = torch.diag(BCRLB)  # [p] in param_order_list order
+        # print("BCRLB full", bcrlb_diag_full)
+        # print("BCRLB EI only", torch.diag(BCRLB2))
+        
 
-        # Run M Monte Carlo trials at this SNR
-        posterior_means_list = []
-        for trial in range(M):
-            if M > 1:
-                print(f"  Trial {trial+1}/{M}")
+        # Build bcrlb_dict in selected_s1 order
+        bcrlb_dict = {}
+        for key in selected_s1:
+            key_tuple = key_to_tuple(key)
+            if key_tuple in param_order_list:
+                idx = param_order_list.index(key_tuple)
+                bcrlb_dict[key] = bcrlb_diag_full[idx].item()
+            else:
+                print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
 
-            # Generate noisy observation (different noise each trial)
-            H1_noisy_c = H_true + std_f * torch.randn_like(H_true.real) + \
-                            1j * std_f * torch.randn_like(H_true.imag)
-            H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
-            H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
-
-            # Run SVI inference
-            pyro.clear_param_store()
-            losses, param_history = run_inference(H1_noisy, current_model, guide, selected_s1, std_f, num_steps=300)
-
-            # Extract posterior means for this trial
-            posterior_means = extract_posterior_means(param_history, num_samples=2048) #dict of {paramname, posterior mean value} for all params
-            posterior_means_list.append(posterior_means)
-
-        # Calculate RMSE across M trials
-        rmse_dict = calculate_rmse_from_trials(posterior_means_list, selected_s1, true_normalized_value=0.25)
-
-        print(f"RMSE (M={M}):", {k: f"{v:.4f}" for k, v in rmse_dict.items()})
-        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+        
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
         # Store results for plotting
         for key in selected_s1:
-            if key in rmse_dict and key in crlb_u1u1t_dict:
-                rmse_results[key].append(rmse_dict[key])
-                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        
 
-    # Plot RMSE vs sqrt(CRLB) across SNR for each parameter
+    # Plot Bayesian RMSE vs BCRLB across SNR
     fig, axes = plt.subplots(3, 4, figsize=(16, 12))
     axes = axes.flatten()
 
@@ -1813,12 +1941,17 @@ if __name__ == '__main__':
         if idx >= len(axes):
             break
         ax = axes[idx]
-        ax.plot(snr_dbs, rmse_results[key], 'bo-', label=f'RMSE (M={M})', markersize=6)
-        ax.plot(snr_dbs, crlb_results[key], 'r--', label='sqrt(CRLB)', linewidth=2)
+        ax.plot(snr_dbs, bayesian_rmse_results[key], 'bo-', label=f'Bayesian RMSE (M={M})', markersize=6)
+        ax.plot(snr_dbs, bayesian_crlb_results[key], 'r--', label='sqrt(BCRLB)', linewidth=2)
+        
+        # Prior std reference line
+        prior_std = math.sqrt(1/12)  # For uniform [0,1]
+        ax.axhline(y=prior_std, color='green', linestyle=':', linewidth=1.5, alpha=0.7, label='Prior std')
+        
         ax.set_xlabel('SNR (dB)')
         ax.set_ylabel('Error')
         ax.set_title(key, fontsize=10)
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
         ax.set_yscale('log')
 
@@ -1826,14 +1959,81 @@ if __name__ == '__main__':
     for idx in range(len(selected_s1), len(axes)):
         axes[idx].set_visible(False)
 
-    fig.suptitle(f'RMSE vs sqrt(CRLB) - SNR Sweep (M={M} trials per SNR)', fontsize=14, y=0.995)
+    fig.suptitle(f'Bayesian RMSE vs sqrt(BCRLB) - SNR Sweep (α={alpha}, M={M} trials per SNR)', fontsize=14, y=0.995)
     plt.tight_layout()
 
-    filename = f"rmse_vs_crlb_snr_sweep_M{M}.pdf"
+    filename = f"bayesian_rmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}.pdf"
     plt.savefig(filename, dpi=150, bbox_inches='tight')
-    #plt.show()
+    plt.show()
 
     print(f"\nSaved plot to {filename}")
+        # # Standard CRLB at this SNR (computed once per SNR, same for all trials at theta = 0.25 for all params)
+        # crlb_u1u1t_dict, _ = compute_real_FIM_and_CRLB(var_f, selected_s1, sensitivities)
+        # # Now bcrlb_dict and crlb_u1u1t_dict are in same order (sorted_keys_s1)
+        # print("Bayesian CRLB:", bcrlb_dict)
+        # print("Classical CRLB:", crlb_u1u1t_dict)
+        
+        # # Run M Monte Carlo trials at this SNR
+        # posterior_means_list = []
+        # for trial in range(M):
+        #     if M > 1:
+        #         print(f"  Trial {trial+1}/{M}")
+
+        #     # Generate noisy observation (different noise each trial)
+        #     H1_noisy_c = H_true + std_f * torch.randn_like(H_true.real) + \
+        #                     1j * std_f * torch.randn_like(H_true.imag)
+        #     H1_noisy_c_expanded = H1_noisy_c.unsqueeze(0).expand(num_obs, -1)
+        #     H1_noisy = torch.view_as_real(H1_noisy_c_expanded)
+
+        #     # Run SVI inference
+        #     pyro.clear_param_store()
+        #     losses, param_history = run_inference(H1_noisy, current_model, guide, selected_s1, std_f, num_steps=300)
+
+        #     # Extract posterior means for this trial
+        #     posterior_means = extract_posterior_means(param_history, num_samples=2048) #dict of {paramname, posterior mean value} for all params
+        #     posterior_means_list.append(posterior_means)
+
+        # # Calculate RMSE across M trials
+        # rmse_dict = calculate_rmse_from_trials(posterior_means_list, selected_s1, true_normalized_value=0.25)
+
+        # print(f"RMSE (M={M}):", {k: f"{v:.4f}" for k, v in rmse_dict.items()})
+        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+
+        # Store results for plotting
+        # for key in selected_s1:
+        #     if key in rmse_dict and key in crlb_u1u1t_dict:
+        #         rmse_results[key].append(rmse_dict[key])
+        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+
+    # Plot RMSE vs sqrt(CRLB) across SNR for each parameter
+    # fig, axes = plt.subplots(3, 4, figsize=(16, 12))
+    # axes = axes.flatten()
+
+    # for idx, key in enumerate(selected_s1):
+    #     if idx >= len(axes):
+    #         break
+    #     ax = axes[idx]
+    #     ax.plot(snr_dbs, rmse_results[key], 'bo-', label=f'RMSE (M={M})', markersize=6)
+    #     ax.plot(snr_dbs, crlb_results[key], 'r--', label='sqrt(CRLB)', linewidth=2)
+    #     ax.set_xlabel('SNR (dB)')
+    #     ax.set_ylabel('Error')
+    #     ax.set_title(key, fontsize=10)
+    #     ax.legend(fontsize=8)
+    #     ax.grid(True, alpha=0.3)
+    #     ax.set_yscale('log')
+
+    # # Hide unused subplots
+    # for idx in range(len(selected_s1), len(axes)):
+    #     axes[idx].set_visible(False)
+
+    # fig.suptitle(f'RMSE vs sqrt(CRLB) - SNR Sweep (M={M} trials per SNR)', fontsize=14, y=0.995)
+    # plt.tight_layout()
+
+    # filename = f"rmse_vs_crlb_snr_sweep_M{M}.pdf"
+    # plt.savefig(filename, dpi=150, bbox_inches='tight')
+    # #plt.show()
+
+    # print(f"\nSaved plot to {filename}")
 
 
     

@@ -1703,7 +1703,7 @@ def calculate_Hnw(cable_lengths, sampled_params, fault_params):
     return H_nw_magnitude_db_1
 
 
-def model_no_fault(H1_noisy):
+def model_no_fault(H1_noisy, std_f):
     """
     Stage 1. Model with no fault
     """
@@ -1756,14 +1756,14 @@ def model_no_fault(H1_noisy):
         pyro.sample(
             "obs",
             dist.Independent(
-                dist.Normal(loc=H1_pred, scale=0.00022655),
+                dist.Normal(loc=H1_pred, scale=std_f),
                 reinterpreted_batch_ndims=2
             ),
             obs=H1_noisy
         )
 
 
-def model_with_fault(H1_noisy):
+def model_with_fault(H1_noisy, std_f):
     """
     Stage 2 - Network with fault - only infer fault parameters. 
     Load/cable parameters or admittance/cable parameters are fixed to their inferred values from Stage 1. 
@@ -1838,7 +1838,7 @@ def model_with_fault(H1_noisy):
         pyro.sample(
             "obs",
             dist.Independent(
-                dist.Normal(loc=H1_pred, scale=0.00022655),
+                dist.Normal(loc=H1_pred, scale=std_f),
                 reinterpreted_batch_ndims=2
             ),
             obs=H1_noisy
@@ -1846,7 +1846,7 @@ def model_with_fault(H1_noisy):
 
 
 
-def guide(H1_noisy):
+def guide(H1_noisy, std_f):
     for load_name, params in network_params["loads"].items():
         for param_name, param_info in params.items():
             if not param_info["inferred"]:
@@ -2170,7 +2170,7 @@ def run_two_stage_inference(cable_lengths, load_params, admittance_params, fault
 
 
 
-def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
+def run_inference(H1_noisy, model, guide, sorted_keys, std_f, num_steps):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
 
@@ -2190,7 +2190,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
     param_history = defaultdict(list)  # Contains Python floats (more memory efficient)
 
     # Initialize parameters by running guide once
-    guide(H1_noisy)
+    # guide(H1_noisy, std_f)
 
     # Save initial parameter values
     # param_store = pyro.get_param_store()
@@ -2198,7 +2198,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, num_steps):
     #     param_history[name].append(value.detach().item())
 
     for step in range(num_steps):
-        loss = svi.step(H1_noisy)
+        loss = svi.step(H1_noisy, std_f)
         losses.append(loss)
 
         # param_store = pyro.get_param_store()
@@ -3552,7 +3552,7 @@ if __name__ == '__main__':
 
             # Run SVI inference
             pyro.clear_param_store()
-            losses, param_history = run_inference(H1_noisy, current_model, guide, selected_s1, num_steps=300)
+            losses, param_history = run_inference(H1_noisy, current_model, guide, selected_s1, std_f, num_steps=300)
 
             # Extract posterior means for this trial
             posterior_means = extract_posterior_means(param_history, num_samples=2048) #dict of {paramname, posterior mean value} for all params
