@@ -1202,7 +1202,7 @@ def calculate_rmse_from_trials(posterior_means_list, sorted_keys, true_normalize
 
     return rmse_dict
 
-def run_inference(H1_noisy, model, guide, sorted_keys, std_f, num_steps):
+def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, M, num_steps):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
 
@@ -1237,8 +1237,8 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, num_steps):
         # for name, value in param_store.items():
         #     param_history[name].append(value.detach().item())
         
-        if step % 25 == 0 or step == 0:
-            print(f"\n===== Step {step} | ELBO: {loss:.6f} =====")
+        if step % 50 == 0 or step == 0:
+            print(f"\n===== SNR {snr_db} | M = {M+1}/100 | Step {step} | ELBO: {loss:.6f} =====")
             print("\n Top 20 Most Sensitive Parameters")
             param_store = pyro.get_param_store()
             for key in top_20_most_sensitive:
@@ -1817,7 +1817,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
         H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
         # 4. Run SVI to get estimate
         pyro.clear_param_store()
-        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, num_steps=300)
+        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, num_steps=300)
         
         # 5. Extract posterior mean
         posterior_means = extract_posterior_means(param_history)
@@ -1944,9 +1944,9 @@ if __name__ == '__main__':
         ax.plot(snr_dbs, bayesian_rmse_results[key], 'bo-', label=f'Bayesian RMSE (M={M})', markersize=6)
         ax.plot(snr_dbs, bayesian_crlb_results[key], 'r--', label='sqrt(BCRLB)', linewidth=2)
         
-        # Prior std reference line
-        prior_std = math.sqrt(1/12)  # For uniform [0,1]
-        ax.axhline(y=prior_std, color='green', linestyle=':', linewidth=1.5, alpha=0.7, label='Prior std')
+        # # Prior std reference line
+        # prior_std = math.sqrt(1/12)  # For uniform [0,1]
+        # ax.axhline(y=prior_std, color='green', linestyle=':', linewidth=1.5, alpha=0.7, label='Prior std')
         
         ax.set_xlabel('SNR (dB)')
         ax.set_ylabel('Error')
