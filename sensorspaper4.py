@@ -32,8 +32,8 @@ SCENARIO = "two_stage"
 #   - "no_fault": Network identification only (Stage 1) - infer load/cable params
 #   - "with_fault": Fault localization only - infer fault params (assumes known network)
 #   - "two_stage": Full workflow - Stage 1 (network ID) then Stage 2 (fault localization)
-OPTIMIZER = "Adagrad"  # "Adam" or "Adagrad"
-LR = 0.2  # Learning rate for optimizer
+OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
+LR = 0.02  # Learning rate for optimizer
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -1035,6 +1035,7 @@ def guide(H1_noisy, std_f):
                 continue
 
             full_name = f"{load_name}_{param_name}"
+
             loc = pyro.param(f"{full_name}_loc", torch.tensor(0.0, device=device))  # std normal
             scale = pyro.param(f"{full_name}_scale", torch.tensor(0.1, device=device), constraint=constraints.positive)
 
@@ -1048,7 +1049,7 @@ def guide(H1_noisy, std_f):
     for key, info in network_params["cable_lengths"].items():
         if not info["inferred"]:
             continue
-
+        
         loc = pyro.param(f"{key}_loc", torch.tensor(0.0, device=device))
         scale = pyro.param(f"{key}_scale", torch.tensor(0.1, device=device), constraint=constraints.positive)
 
@@ -1172,7 +1173,7 @@ def set_network_params_from_normalized(sampled_theta, param_order_list):
 def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_steps):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
-
+    
     if OPTIMIZER == "Adam":
         optimizer = pyro.optim.Adam({"lr": LR})
     elif OPTIMIZER == "Adagrad":
@@ -1182,39 +1183,72 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
 
     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
 
+    #call guide to initialize params
+    guide(H1_noisy, std_f)
+    param_store = pyro.get_param_store()
+    print(f"\n===== STEP 0 (INITIALIZATION) =====")
+
+    for key in sorted_keys[:20]:
+        store_key = key.replace(".", "_") + "_loc"
+        
+        if store_key in param_store:
+            if "." in key:
+                load_name, param_name = key.split(".")
+                lo, hi = network_params["loads"][load_name][param_name]["range"]
+                physical_val = network_params["loads"][load_name][param_name]["value"]
+            else:
+                lo, hi = network_params["cable_lengths"][key]["range"]
+                physical_val = network_params["cable_lengths"][key]["value"]
+
+            true_norm = (physical_val - lo) / (hi - lo)
+
+            loc = param_store[store_key].detach()
+            sig = torch.sigmoid(loc)
+
+            print(f"{key:40s} (sigmoid) = {sig.item():.4f} | True = {true_norm:.4f}")
+            
     losses = []
-    param_history = defaultdict(list)  # Contains Python floats (more memory efficient)
+    param_history = defaultdict(list)  # Contains Python floats not tensors (more memory efficient)
 
     for step in range(num_steps):
         loss = svi.step(H1_noisy, std_f)
         losses.append(loss)
 
-        if step % 50 == 0 or step == 0:
+        if step % 50 == 0:
             print(f"\n===== SNR {snr_db} | m = {m+1}/{M} | Step {step} | ELBO: {loss:.6f} =====")
             print("\n Top 20 Most Sensitive Parameters")
+
+            # # AutoMultivariateNormal: get posterior samples by calling guide
+            # loc = pyro.get_param_store()["AutoMultivariateNormal.loc"]
+            # theta = torch.sigmoid(loc)
+
+            # param_names = [
+            #     name for name, site in guide.prototype_trace.nodes.items()
+            #     if site["type"] == "sample"
+            # ]
+
+            # for i, name in enumerate(param_names):
+            #     print(f"{name}: {theta[i].item():.4f}")
+
+            # OLD: Custom mean-field guide (commented out)
             param_store = pyro.get_param_store()
-
             for key in sorted_keys[:20]:
-                # key is like "load_3.C_m_leak" or "l_w_4"
-                store_key = key.replace(".", "_") + "_loc"  # Convert to param_store format
-
+                store_key = key.replace(".", "_") + "_loc"
                 if store_key in param_store:
-                    # Get true value from network_params
                     if "." in key:
-                        # Load param: "load_3.C_m_leak" -> split on "."
                         load_name, param_name = key.split(".")
                         lo, hi = network_params["loads"][load_name][param_name]["range"]
                         physical_val = network_params["loads"][load_name][param_name]["value"]
                     else:
-                        # Cable param: "l_w_4"
                         lo, hi = network_params["cable_lengths"][key]["range"]
                         physical_val = network_params["cable_lengths"][key]["value"]
-
-                    true_norm = (physical_val - lo) / (hi - lo)  # Normalize to [0,1]
+                    true_norm = (physical_val - lo) / (hi - lo)
                     print(f"{key:40s} (sigmoid) = {torch.sigmoid(param_store[store_key]):.4f} | True = {true_norm:.4f}")
+
+    #Store last step value only
     param_store = pyro.get_param_store()
     for name, value in param_store.items():
-        param_history[name] = [value.detach().item()]  # Single value
+        param_history[name] = [value.detach().item()]  
     print("Inference complete.")
     return losses, param_history
 
@@ -1545,7 +1579,7 @@ def compute_real_FIM(var_f):
     I2 = D.T @ I @ D
     return I2
 
-def compute_real_CRLB(var_f, theta_true, sorted_keys_s1, sensitivities):
+def compute_real_CRLB(var_f, sorted_keys_s1, sensitivities):
     """
     g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately) \\
     P = number of parameters (inputs) \\
@@ -1601,7 +1635,7 @@ def compute_real_CRLB(var_f, theta_true, sorted_keys_s1, sensitivities):
     U1 = eigvecs2[:, mask]            # shape [p, r]
     U2 = eigvecs2[:, ~mask]            #shape[p, p-r] 
     num_zeroed2 = (eigvals2 <= tol).sum().item()
-    print("num zerod 2 for manual tolerance 1e-15", num_zeroed2)
+    # print("num zerod 2 for manual tolerance 1e-15", num_zeroed2)
 
 
     J_pinv = U1 @ torch.diag(1.0 / Lambda1) @ U1.T
@@ -1612,10 +1646,10 @@ def compute_real_CRLB(var_f, theta_true, sorted_keys_s1, sensitivities):
     
     S2, keep_indices = build_S2_from_nullspace(U2, tol=1e-8)
 
-    print("keep_indices =", keep_indices)
-    print("param order", param_order_list)
-    print("S2 shape =", S2.shape)
-    print("S2 =\n", S2)
+    # print("keep_indices =", keep_indices)
+    # print("param order", param_order_list)
+    # print("S2 shape =", S2.shape)
+    # print("S2 =\n", S2)
     
     SU2 = S2 @ U2
     # print("S2 @ U2 =\n", SU2)
@@ -1796,9 +1830,30 @@ def compute_real_BCRLB(snr_db, selected_keys, param_order_list, alpha, num_sampl
             print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
     
     return bcrlb_dict
+def compute_loss_at_theta(H_obs, theta_normalized, param_order_list, std_f):
+    """
+    Compute squared error loss at given theta values.
+    
+    Args:
+        H_obs: Observed H (complex tensor)
+        theta_normalized: [p] tensor of normalized params in [0,1]
+        param_order_list: Parameter ordering
+        std_f: Noise std
+    """
+    # Set network params to theta
+    set_network_params_from_normalized(theta_normalized, param_order_list)
+    
+    # Compute H at this theta
+    cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
+    H_pred = calculate_Hnw_nofault(cable_lengths, load_params)
+    
+    # Squared error
+    error = torch.abs(H_pred - H_obs)**2
+    loss = error.sum() / (2 * std_f**2)
+    
+    return loss.item()
 
-
-def calculate_mse_monte_carlo(var_f, theta_true, selected_s1, snr_db, M, num_steps):
+def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, num_steps):
     """
     Compute Frequentist MSE via Monte Carlo at specific SNR.
     For each trial:
@@ -1818,18 +1873,18 @@ def calculate_mse_monte_carlo(var_f, theta_true, selected_s1, snr_db, M, num_ste
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
 
     for m in range(M):
-        print(f"  Trial {m+1}/{M}")
+        print(f"Run {m+1}/{M}")
 
-        # 1. Generate noisy observation (different noise each trial)
+        # 1. Generate noisy observation (different observation each run because of noise)
         H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
                      1j * std_f * torch.randn_like(H_clean.imag)
-        H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
+        H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0)) #[1, F, 2]
 
-        # 2. Run SVI inference
-        pyro.clear_param_store()
+        # 2. Run SVI inference 
+        #auto_guide = AutoMultivariateNormal(model_no_fault)  # Full covariance guide
         losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M, num_steps)
 
-        # 3. Extract posterior means for this trial
+        # 3. Extract posterior means for this run
         posterior_means = extract_posterior_means(param_history)
 
         # 4. Compute squared errors vs true theta
@@ -1916,7 +1971,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
     bayesian_mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
     
     return bayesian_mse_dict
-def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys, 
+def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys, p,
                                  is_bayesian=False, M=None, alpha=None, filename=None):
     """
     Plot RMSE vs sqrt(CRLB) across SNR for each parameter.
@@ -1953,7 +2008,7 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
         
         # Plot data
         ax.plot(snr_dbs, rmse_results[key], 'bo-', label=rmse_label, markersize=6)
-        ax.plot(snr_dbs, crlb_results[key], 'r--', label=crlb_label, linewidth=2)
+        ax.plot(snr_dbs, crlb_results[key], 'r--s', label=crlb_label, linewidth=2, markersize=4)
         
         # # Prior std reference line (only for Bayesian)
         # if is_bayesian:
@@ -1979,9 +2034,9 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     # Generate filename if not provided
     if filename is None:
         if is_bayesian:
-            filename = f"bayesian_rmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}.pdf"
+            filename = f"bayesian_rmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}_p{p}.pdf"
         else:
-            filename = f"rmse_vs_crlb_snr_sweep_M{M}.pdf"
+            filename = f"rmse_vs_crlb_snr_sweep_M{M}_p{p}.pdf"
     
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.show()
@@ -2022,26 +2077,23 @@ if __name__ == '__main__':
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    print("cable lengths", cable_lengths)
     selected_s1, sorted_keys_s1, sensitivities = perform_load_sensitivity_analysis(
         load_params, fault_params, cable_lengths, p, scenario="no_fault"
     )
     
-    
-    
-    num_steps = 500
-    M = 10 # Number of Monte Carlo trials per SNR
+    num_steps = 1500
+    M = 5 # Number of Monte Carlo trials per SNR
     alpha = 1.1
     #snr_dbs = [40]
-    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
 
     bayesian_rmse_results = {key: [] for key in selected_s1}
     bayesian_crlb_results = {key: [] for key in selected_s1}
 
-    J_pi = compute_prior_fim_beta_mc(alpha, p) #not dep on SNR move out of loop
+    #J_pi = compute_prior_fim_beta_mc(alpha, p) #not dep on SNR move out of loop
 
     for snr_db in snr_dbs:
         print(f"\n{'='*50}")
@@ -2050,8 +2102,8 @@ if __name__ == '__main__':
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
         # Standard CRLB + RMSE
-        crlb_u1u1t_dict, _ = compute_real_CRLB(var_f, theta_true, selected_s1, sensitivities)
-        mse = calculate_mse_monte_carlo(var_f, theta_true, selected_s1, snr_db, M, num_steps)
+        crlb_u1u1t_dict, _ = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, num_steps)
         print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
         print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
         
@@ -2076,7 +2128,7 @@ if __name__ == '__main__':
     # plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1,
     #                         is_bayesian=True, M=M, alpha=alpha)
     # # Usage for Frequentist:
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1,
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p,
                                 is_bayesian=False, M=M)
 
     
