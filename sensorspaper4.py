@@ -6,7 +6,7 @@ import copy
 import math
 import pandas as pd
 import matplotlib
-matplotlib.use("Agg")
+#matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import time
 import pyro.distributions as dist
@@ -107,7 +107,7 @@ print(f"Using device: {device}")
 #frequencies = torch.logspace(torch.log10(torch.tensor(2e6)), torch.log10(torch.tensor(10e6)), 500) #2-10MHz
 #frequencies = torch.logspace(torch.log10(torch.tensor(150e3)), torch.log10(torch.tensor(30e6)), 200) #150KHz - 30MHz
 frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
-                              torch.log10(torch.tensor(500e3, device=device)), 200, device=device) #150KHz - 500KHz
+                              torch.log10(torch.tensor(2e6, device=device)), 200, device=device) #150KHz - 500KHz
 freq_range_mhz = frequencies / 1e6
 omega = 2 * torch.pi * frequencies
 num_freqs = len(omega)
@@ -1148,12 +1148,12 @@ def update_network_params_from_posterior(posterior_means):
 
 def set_network_params_from_normalized(sampled_theta, param_order_list):
     """
-    Update network_params with sampled theta. Used to calculate Bayesian CLRB.
+    Update global network_params dict with sampled theta only for keys in param_order_list. 
     Args:
         sampled_theta: Sampled tensor of theta of shape [p] where theta in [0, 1]
-        param_order_list: List of selected_keys like ["load_1.C_mleak, etc.]
     """
     counter = 0
+
     for params in param_order_list: 
         if params[0] == "load":
             entity_name = params[1]
@@ -1744,7 +1744,7 @@ def compute_prior_fim_beta_mc(alpha, p, num_samples=100000):
     J_p /= num_samples
     return J_p
 
-def compute_expected_data_fim(p, snr_db, param_order_list, alpha, num_samples=100):
+def compute_expected_data_fim(p, snr_db, alpha, num_samples=100):
     """
     Compute E_π[I(θ)] via Monte Carlo.
     
@@ -1758,7 +1758,7 @@ def compute_expected_data_fim(p, snr_db, param_order_list, alpha, num_samples=10
     theta_samples = beta_dist.sample((num_samples, p))  # [num_samples, p]    
     # Accumulate FIMs
     E_I = torch.zeros(p, p)
-
+    param_order_list, _ = get_inferred_param_order()
     for m in range(num_samples):
         print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
         set_network_params_from_normalized(theta_samples[m], param_order_list)
@@ -1790,28 +1790,28 @@ def key_to_tuple(key):
         # Cable parameter: 'l_w_4' → ('cable', 'l_w_4', None)
         return ('cable', key, None)
     
-def compute_real_BCRLB(snr_db, selected_keys, param_order_list, alpha, num_samples=100):
+def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
     """
     Compute Bayesian CRLB.
     
     Args:
         snr_db: SNR in dB
         selected_keys: List of parameter keys to extract (in desired order)
-        param_order_list: Full parameter order list
+        p: Number of inferred parameters
         alpha: Beta prior parameter
         num_samples: Number of MC samples for E[I(θ)]
     
     Returns:
         bcrlb_dict: {param_name: BCRLB_value} in selected_keys order
     """
-    p = len(param_order_list)
-    
+
     # Compute E[I(θ)]
-    E_I = compute_expected_data_fim(p, snr_db, param_order_list, alpha, num_samples)
+    E_I = compute_expected_data_fim(p, snr_db, alpha, num_samples)
+    print("E_I", E_I)
     
     # Compute J_π (prior FIM)
     J_pi = compute_prior_fim_beta_mc(alpha, p)
-    
+    print("J_pi", J_pi)
     # Bayesian FIM
     J_B = E_I + J_pi
     
@@ -1886,6 +1886,9 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, num_steps):
 
         # 3. Extract posterior means for this run
         posterior_means = extract_posterior_means(param_history)
+
+        # Plot TF vs reconstructed TF from these posterior means
+        plot_CI_and_pred_TF(param_history, "no_fault", snr_db)
 
         # 4. Compute squared errors vs true theta
         for key in selected_s1:
@@ -1971,6 +1974,9 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
     bayesian_mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
     
     return bayesian_mse_dict
+
+
+#Plotting stuff
 def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys, p,
                                  is_bayesian=False, M=None, alpha=None, filename=None):
     """
@@ -2042,6 +2048,96 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     plt.show()
     print(f"\nSaved plot to {filename}")
 
+def plot_CI_and_pred_TF(param_history, scenario, snr_db, num_samples=200):
+    param_order_list, p = get_inferred_param_order()
+    params_flat = get_true_param_flat()
+    cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
+    H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+    H_clean_db = 20*torch.log10(torch.abs(H_clean))
+    
+    tf_samples = []
+
+    for i in range(num_samples):
+        # Build sampled parameters for both full and reduced models
+        sampled_cable_lengths = {}
+        sampled_load_params = {}
+        sampled_fault_params = {}
+
+        # Sample load params
+        for load_name, params in network_params["loads"].items():
+            sampled_load_params[load_name] = {}
+            for param_name, param_info in params.items():
+                pyro_key = f"{load_name}_{param_name}_loc"
+                if pyro_key in param_history:
+                    lo, hi = param_info["range"]
+                    loc = param_history[pyro_key][-1]
+                    scale = param_history[f"{load_name}_{param_name}_scale"][-1]
+                    z = np.random.normal(loc, scale)
+                    sigmoid_z = 1 / (1 + np.exp(-z))
+                    sampled_load_params[load_name][param_name] = torch.tensor(denormalize(sigmoid_z, lo, hi), device=device)
+                else:
+                    sampled_load_params[load_name][param_name] = torch.tensor(param_info["value"], device=device)
+
+        # Sample cable params
+        for cable_name, cable_info in network_params["cable_lengths"].items():
+            pyro_key = f"{cable_name}_loc"
+            if pyro_key in param_history:  # Check if was inferred
+                lo, hi = cable_info.get("infer_range", cable_info["range"])
+                loc = param_history[pyro_key][-1]
+                scale = param_history[f"{cable_name}_scale"][-1]
+                z = np.random.normal(loc, scale)
+                sigmoid_z = 1 / (1 + np.exp(-z))
+                sampled_cable_lengths[cable_name] = torch.tensor(denormalize(sigmoid_z, lo, hi), device=device)
+            else:
+                sampled_cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
+
+        # # Sample fault params (if with_fault scenario)
+        # if scenario == "with_fault":
+        #     for fault_name, fault_info in network_params["fault_parameters"].items():
+        #         pyro_key = f"{fault_name}_loc"
+        #         if pyro_key in param_history:  # Check if was inferred
+        #             lo, hi = fault_info["range"]
+        #             loc = param_history[pyro_key][-1]
+        #             scale = param_history[f"{fault_name}_scale"][-1]
+        #             z = np.random.normal(loc, scale)
+        #             sigmoid_z = 1 / (1 + np.exp(-z))
+        #             sampled_fault_params[fault_name] = torch.tensor(denormalize(sigmoid_z, lo, hi), device=device)
+        #         else:
+        #             sampled_fault_params[fault_name] = torch.tensor(fault_info["value"], device=device)
+
+        # Compute TF with sampled parameters based on FORWARD_MODEL
+        if scenario == "with_fault":
+            H_sample = calculate_Hnw(sampled_cable_lengths, sampled_load_params, sampled_fault_params)
+        else:
+            H_sample = calculate_Hnw_nofault(sampled_cable_lengths, sampled_load_params)
+        tf_samples.append(20*torch.log10(torch.abs(H_sample)).detach().numpy())
+
+    # Stack samples: (num_samples, num_freqs)
+    tf_samples = np.stack(tf_samples, axis=0)
+    
+    # Compute mean and percentiles
+    tf_mean = np.mean(tf_samples, axis=0)
+    tf_lower = np.percentile(tf_samples, 2.5, axis=0)
+    tf_upper = np.percentile(tf_samples, 97.5, axis=0)
+    
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(freq_range_mhz.numpy(), tf_mean, 'k-', linewidth=1.5, label='Model')
+    plt.plot(freq_range_mhz.numpy(), H_clean_db.detach().numpy(), 'r--', linewidth=1.5, label='Truth')
+    plt.fill_between(freq_range_mhz.numpy(), tf_lower, tf_upper, 
+                     alpha=0.3, color='steelblue', label='95% CI')
+    
+    plt.xscale('log')
+    plt.xlabel('Frequency (MHz)', fontsize=12)
+    plt.ylabel(r'$H_{1,1}$ (dB)', fontsize=12)
+    plt.legend(loc='lower left', fontsize=10)
+    plt.grid(True, which='both', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+    plt.savefig(f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf', dpi=300, bbox_inches='tight')
+    plt.close()
+
+    print(f"Saved figure to {FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf")
+    return tf_mean, tf_lower, tf_upper
 
 if __name__ == '__main__':  
     start_time = time.time()
@@ -2063,12 +2159,14 @@ if __name__ == '__main__':
     for fault_name in network_params["fault_parameters"]:
         network_params["fault_parameters"][fault_name]["inferred"] = False
 
-    p = 3
+    p = 10
     param_order_list, P = get_inferred_param_order() #P = 119 total number of params
     g = torch.Generator()
     g.manual_seed(36)
     #theta_true = torch.full([P], 0.75)
-    theta_true = torch.rand(P, generator=g)
+    a, b = 0.2, 0.8
+    theta_true = a + (b - a) * torch.rand(P, generator=g)
+    #theta_true = torch.rand(P, generator=g)
     print("theta true", theta_true)
     #theta_true = torch.rand(P)  # Sample from Uniform[0,1] for each parameter
     set_network_params_from_normalized(theta_true, param_order_list)
@@ -2081,8 +2179,9 @@ if __name__ == '__main__':
         load_params, fault_params, cable_lengths, p, scenario="no_fault"
     )
     
-    num_steps = 1500
-    M = 5 # Number of Monte Carlo trials per SNR
+    num_steps = 500
+    M = 1 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+    M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
     alpha = 1.1
     #snr_dbs = [40]
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
@@ -2108,8 +2207,8 @@ if __name__ == '__main__':
         print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
         
         # Bayesian CRLB + BRMSE
-        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, param_order_list, alpha, M)
-        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M)
+        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
+        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M2)
         # print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
         # print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
@@ -2118,6 +2217,7 @@ if __name__ == '__main__':
             if key in mse and key in crlb_u1u1t_dict:
                 rmse_results[key].append(math.sqrt(mse[key]))
                 crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        
         # Store results for plotting
         # for key in selected_s1:
         #     if key in bayesian_mse and key in bcrlb_dict:
