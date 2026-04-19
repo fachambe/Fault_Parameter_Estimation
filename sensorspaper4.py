@@ -33,7 +33,8 @@ SCENARIO = "two_stage"
 #   - "with_fault": Fault localization only - infer fault params (assumes known network)
 #   - "two_stage": Full workflow - Stage 1 (network ID) then Stage 2 (fault localization)
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.02  # Learning rate for optimizer
+LR = 0.2  # Learning rate for optimizer
+NUM_STEPS = 500 #Num of SVI steps
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -1853,7 +1854,7 @@ def compute_loss_at_theta(H_obs, theta_normalized, param_order_list, std_f):
     
     return loss.item()
 
-def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, num_steps):
+def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
     """
     Compute Frequentist MSE via Monte Carlo at specific SNR.
     For each trial:
@@ -1888,7 +1889,7 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, num_steps):
         posterior_means = extract_posterior_means(param_history)
 
         # Plot TF vs reconstructed TF from these posterior means
-        plot_CI_and_pred_TF(param_history, "no_fault", snr_db)
+        plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db)
 
         # 4. Compute squared errors vs true theta
         for key in selected_s1:
@@ -1977,7 +1978,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
 
 
 #Plotting stuff
-def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys, p,
+def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys, p, seed,
                                  is_bayesian=False, M=None, alpha=None, filename=None):
     """
     Plot RMSE vs sqrt(CRLB) across SNR for each parameter.
@@ -2040,15 +2041,15 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     # Generate filename if not provided
     if filename is None:
         if is_bayesian:
-            filename = f"bayesian_rmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}_p{p}.pdf"
+            filename = f"bayesian_rmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}_p{p}_seed{seed}.pdf"
         else:
-            filename = f"rmse_vs_crlb_snr_sweep_M{M}_p{p}.pdf"
+            filename = f"rmse_vs_crlb_snr_sweep_M{M}_p{p}_seed{seed}.pdf"
     
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.show()
     print(f"\nSaved plot to {filename}")
 
-def plot_CI_and_pred_TF(param_history, scenario, snr_db, num_samples=200):
+def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, num_samples=200):
     param_order_list, p = get_inferred_param_order()
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
@@ -2133,10 +2134,10 @@ def plot_CI_and_pred_TF(param_history, scenario, snr_db, num_samples=200):
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf', dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Saved figure to {FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf")
+    print(f"Saved figure to {snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf")
     return tf_mean, tf_lower, tf_upper
 
 if __name__ == '__main__':  
@@ -2160,11 +2161,12 @@ if __name__ == '__main__':
         network_params["fault_parameters"][fault_name]["inferred"] = False
 
     p = 10
+    seed = 38
     param_order_list, P = get_inferred_param_order() #P = 119 total number of params
     g = torch.Generator()
-    g.manual_seed(36)
+    g.manual_seed(seed)
     #theta_true = torch.full([P], 0.75)
-    a, b = 0.2, 0.8
+    a, b = 0.3, 0.7
     theta_true = a + (b - a) * torch.rand(P, generator=g)
     #theta_true = torch.rand(P, generator=g)
     print("theta true", theta_true)
@@ -2179,8 +2181,8 @@ if __name__ == '__main__':
         load_params, fault_params, cable_lengths, p, scenario="no_fault"
     )
     
-    num_steps = 500
-    M = 1 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+
+    M = 20 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
     M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
     alpha = 1.1
     #snr_dbs = [40]
@@ -2202,7 +2204,7 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
         # Standard CRLB + RMSE
         crlb_u1u1t_dict, _ = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, num_steps)
+        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, NUM_STEPS)
         print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
         print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
         
@@ -2228,7 +2230,7 @@ if __name__ == '__main__':
     # plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1,
     #                         is_bayesian=True, M=M, alpha=alpha)
     # # Usage for Frequentist:
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p,
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
                                 is_bayesian=False, M=M)
 
     
