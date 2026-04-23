@@ -18,6 +18,7 @@ from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.infer.autoguide import AutoMultivariateNormal, AutoGuideList, AutoNormal
 from scipy.linalg import expm
 from torch.func import jacfwd
+from pyro.optim import PyroLRScheduler
 
 from pyro.infer import SVI, Trace_ELBO
 from collections import defaultdict
@@ -32,9 +33,9 @@ SCENARIO = "two_stage"
 #   - "no_fault": Network identification only (Stage 1) - infer load/cable params
 #   - "with_fault": Fault localization only - infer fault params (assumes known network)
 #   - "two_stage": Full workflow - Stage 1 (network ID) then Stage 2 (fault localization)
-OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.2  # Learning rate for optimizer
-NUM_STEPS = 500 #Num of SVI steps
+OPTIMIZER = "Adagrad"  # "Adam" or "Adagrad"
+LR = 0.2 # Learning rate for optimizer
+NUM_STEPS = 2000 #Num of SVI steps
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -54,8 +55,8 @@ FIXED_LOAD_TYPES = [
     1,  # load_13 R3-O2  Constant
     1,  # load_14 R3-O1  Constant
     3,  # load_15 R2-O4  Motor
-    3,  # load_16 R2-O3  Motor
-    3,  # load_17 R2-O2  Motor
+    2,  # load_16 R2-O3  Motor
+    1,  # load_17 R2-O2  Motor
     3,  # load_18 R2-O1  Motor
     1,  # load_19 R1-O4  Constant
     3,  # load_20 R1-O3  Motor
@@ -941,7 +942,7 @@ def model_no_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            #infer_lo, infer_hi = param_info["range"]
+            #infer_lo, infer_hi = cable_info["range"]
             infer_lo, infer_hi = cable_info.get("infer_range", cable_info["range"])
             norm_sample = pyro.sample(f"{cable_name}", dist.Uniform(0.0, 1.0))
             physical_value = denormalize(norm_sample, infer_lo, infer_hi)
@@ -1181,15 +1182,22 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
         optimizer = pyro.optim.Adagrad({"lr": LR})
     else:
         raise ValueError(f"Unknown optimizer: {OPTIMIZER}. Use 'Adam' or 'Adagrad'.")
-
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
+    
+    #optimizer = SGD({"lr": 0.01, "momentum": 0.9})
+    # PyroLRScheduler with CosineAnnealingWarmRestarts
+    # Scheduler args (T_0) go in the same dict as optimizer and optim_args
+    scheduler = PyroLRScheduler(
+        torch.optim.lr_scheduler.CosineAnnealingWarmRestarts,
+        {'optimizer': torch.optim.Adam, 'optim_args': {'lr': LR}, 'T_0': 200}
+    )
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=15))
 
     #call guide to initialize params
     guide(H1_noisy, std_f)
     param_store = pyro.get_param_store()
     print(f"\n===== STEP 0 (INITIALIZATION) =====")
 
-    for key in sorted_keys[:20]:
+    for key in sorted_keys[:10]:
         store_key = key.replace(".", "_") + "_loc"
         
         if store_key in param_store:
@@ -1198,7 +1206,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
                 lo, hi = network_params["loads"][load_name][param_name]["range"]
                 physical_val = network_params["loads"][load_name][param_name]["value"]
             else:
-                lo, hi = network_params["cable_lengths"][key]["range"]
+                lo, hi = network_params["cable_lengths"][key]["infer_range"]
                 physical_val = network_params["cable_lengths"][key]["value"]
 
             true_norm = (physical_val - lo) / (hi - lo)
@@ -1213,11 +1221,18 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
 
     for step in range(num_steps):
         loss = svi.step(H1_noisy, std_f)
+        #scheduler.step()  # Updates LR according to cosine annealing with warm restarts
         losses.append(loss)
+
+        # # Manual optimizer reset (commented out - using scheduler instead)
+        # if step == 200:
+        #     optimizer = pyro.optim.Adam({"lr": LR})
+        #     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
+        #     print(f"\n===== OPTIMIZER RESET at step {step} =====")
 
         if step % 50 == 0:
             print(f"\n===== SNR {snr_db} | m = {m+1}/{M} | Step {step} | ELBO: {loss:.6f} =====")
-            print("\n Top 20 Most Sensitive Parameters")
+            print("\n Top 10 Most Sensitive Parameters")
 
             # # AutoMultivariateNormal: get posterior samples by calling guide
             # loc = pyro.get_param_store()["AutoMultivariateNormal.loc"]
@@ -1233,7 +1248,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
 
             # OLD: Custom mean-field guide (commented out)
             param_store = pyro.get_param_store()
-            for key in sorted_keys[:20]:
+            for key in sorted_keys[:10]:
                 store_key = key.replace(".", "_") + "_loc"
                 if store_key in param_store:
                     if "." in key:
@@ -1241,7 +1256,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
                         lo, hi = network_params["loads"][load_name][param_name]["range"]
                         physical_val = network_params["loads"][load_name][param_name]["value"]
                     else:
-                        lo, hi = network_params["cable_lengths"][key]["range"]
+                        lo, hi = network_params["cable_lengths"][key]["infer_range"]
                         physical_val = network_params["cable_lengths"][key]["value"]
                     true_norm = (physical_val - lo) / (hi - lo)
                     print(f"{key:40s} (sigmoid) = {torch.sigmoid(param_store[store_key]):.4f} | True = {true_norm:.4f}")
@@ -1993,7 +2008,7 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
         alpha: Beta prior parameter (for Bayesian plots)
         filename: Output filename (if None, auto-generated)
     """
-    fig, axes = plt.subplots(3, 4, figsize=(16, 12))
+    fig, axes = plt.subplots(2, 5, figsize=(20, 8))
     axes = axes.flatten()
 
     # Set labels based on Bayesian vs Frequentist
@@ -2161,30 +2176,52 @@ if __name__ == '__main__':
         network_params["fault_parameters"][fault_name]["inferred"] = False
 
     p = 10
-    seed = 38
+    seed = 59
+    M = 10 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+    M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
+    alpha = 5.0
     param_order_list, P = get_inferred_param_order() #P = 119 total number of params
     g = torch.Generator()
     g.manual_seed(seed)
-    #theta_true = torch.full([P], 0.75)
+    theta_true3 = torch.full([P], 0.25)
     a, b = 0.3, 0.7
     theta_true = a + (b - a) * torch.rand(P, generator=g)
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    theta_true2 = torch.zeros(P)
+    for i in range(P):
+        # Beta uses gamma internally, which respects torch's RNG
+        torch.manual_seed(seed + i)  # Different seed per param but reproducible
+        theta_true2[i] = beta_dist.sample()
+
+    print("theta beta", theta_true2)
     #theta_true = torch.rand(P, generator=g)
-    print("theta true", theta_true)
+    print("theta uniform", theta_true)
+
+    # theta_true4: load params = 0.25, cable params = Beta(5,5)
+    # param_order_list contains tuples: ("cable", name, None) or ("load", load_name, param_name)
+    theta_true4 = torch.zeros(P)
+    for i, param_tuple in enumerate(param_order_list):
+        if param_tuple[0] == "cable":  # Cable length parameter
+            torch.manual_seed(seed + i)
+            theta_true4[i] = beta_dist.sample()
+        else:  # Load parameter
+            theta_true4[i] = 0.25
+    print("theta_true4 (loads=0.25, cables=Beta):", theta_true4)
+    
     #theta_true = torch.rand(P)  # Sample from Uniform[0,1] for each parameter
-    set_network_params_from_normalized(theta_true, param_order_list)
+    set_network_params_from_normalized(theta_true4, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
+    print("cable lengths", network_params["cable_lengths"])
     selected_s1, sorted_keys_s1, sensitivities = perform_load_sensitivity_analysis(
         load_params, fault_params, cable_lengths, p, scenario="no_fault"
     )
     
 
-    M = 20 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
-    M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
-    alpha = 1.1
+
     #snr_dbs = [40]
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
