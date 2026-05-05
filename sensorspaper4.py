@@ -33,9 +33,9 @@ SCENARIO = "two_stage"
 #   - "no_fault": Network identification only (Stage 1) - infer load/cable params
 #   - "with_fault": Fault localization only - infer fault params (assumes known network)
 #   - "two_stage": Full workflow - Stage 1 (network ID) then Stage 2 (fault localization)
-OPTIMIZER = "Adagrad"  # "Adam" or "Adagrad"
-LR = 0.2 # Learning rate for optimizer
-NUM_STEPS = 2000 #Num of SVI steps
+OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
+LR = 0.5 # Learning rate for optimizer
+NUM_STEPS = 500 #Num of SVI steps
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -55,8 +55,8 @@ FIXED_LOAD_TYPES = [
     1,  # load_13 R3-O2  Constant
     1,  # load_14 R3-O1  Constant
     3,  # load_15 R2-O4  Motor
-    2,  # load_16 R2-O3  Motor
-    1,  # load_17 R2-O2  Motor
+    2,  # load_16 R2-O3  Double RLC
+    1,  # load_17 R2-O2  Constant
     3,  # load_18 R2-O1  Motor
     1,  # load_19 R1-O4  Constant
     3,  # load_20 R1-O3  Motor
@@ -109,7 +109,7 @@ print(f"Using device: {device}")
 #frequencies = torch.logspace(torch.log10(torch.tensor(2e6)), torch.log10(torch.tensor(10e6)), 500) #2-10MHz
 #frequencies = torch.logspace(torch.log10(torch.tensor(150e3)), torch.log10(torch.tensor(30e6)), 200) #150KHz - 30MHz
 frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
-                              torch.log10(torch.tensor(2e6, device=device)), 200, device=device) #150KHz - 500KHz
+                              torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
 freq_range_mhz = frequencies / 1e6
 omega = 2 * torch.pi * frequencies
 num_freqs = len(omega)
@@ -142,7 +142,7 @@ BACKBONE_KEYS = ["l_w_0", "l_w_1", "l_w_4", "l_w_25", "l_w_28"]
 # ---- Define Network Parameter Dictionary ----
 network_params = {
     "cable_lengths": {  # 30 parameters, set all to 0.25
-        f"l_w_{i}": {"value": denormalize(0.25, 2, 20), "inferred": True, "range": (2, 20), "infer_range": (6.0, 8.0)}
+        f"l_w_{i}": {"value": denormalize(0.25, 2, 20), "inferred": True, "range": (2, 20)}
         for i in range(30)
     },
     "conductor_radii": {  # Fixed values, not inferred
@@ -687,8 +687,15 @@ def calculate_Hnw_nofault(cable_lengths, sampled_params):
     Y_61 = Y_63 + Y_loads["load_2"]
     rho61 = reflection_coefficient(Y_61, T_r, Tinv_r, ZC_r, YC_r)
     Y_6 = carry_back_load(rho61, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{3}"])
-   # print("Y2", Y_6)
+    # print("Y2", Y_6)
+    # print("Y2 shape", Y_6.shape)
+    # Y_mag = torch.abs(Y_6)  # [200, 3, 3]
     
+    # # Frobenius norm per frequency
+    # Y_norm_per_freq = torch.linalg.norm(Y_6, dim=(1,2))  # [200]
+    # print(f"Mean |Y_side|: {Y_norm_per_freq.mean().item():.6f}")
+    # print(f"Min  |Y_side|: {Y_norm_per_freq.min().item():.6f}")
+    # print(f"Max  |Y_side|: {Y_norm_per_freq.max().item():.6f}")
     Y_node3 = Y_node2carried + Y_6
     rho3 = reflection_coefficient(Y_node3, T_s, Tinv_s, ZC_s, YC_s)
     h3 = h_B(rho3, ZC_s, T_s, Tinv_s, gamma_s, cable_lengths[f"l_w_{4}"])
@@ -931,7 +938,7 @@ def model_no_fault(H1_noisy, std_f):
         for param_name, param_info in params.items():
             if param_info["inferred"]:
                 min_val, max_val = param_info["range"]
-                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
+                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(5.0, 5.0))
                 load_dict[param_name] = denormalize(norm_sample, min_val, max_val)
             else:
                 load_dict[param_name] = torch.tensor(param_info["value"], device=device)
@@ -942,9 +949,8 @@ def model_no_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            #infer_lo, infer_hi = cable_info["range"]
-            infer_lo, infer_hi = cable_info.get("infer_range", cable_info["range"])
-            norm_sample = pyro.sample(f"{cable_name}", dist.Uniform(0.0, 1.0))
+            infer_lo, infer_hi = cable_info["range"]
+            norm_sample = pyro.sample(f"{cable_name}", dist.Beta(5.0, 5.0))
             physical_value = denormalize(norm_sample, infer_lo, infer_hi)
             cable_lengths[cable_name] = physical_value
         else:
@@ -989,7 +995,7 @@ def model_with_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            infer_lo, infer_hi = cable_info.get("infer_range", cable_info["range"])
+            infer_lo, infer_hi = cable_info["range"]
             norm_sample = pyro.sample(f"{cable_name}", dist.Uniform(0.0, 1.0))
             physical_value = denormalize(norm_sample, infer_lo, infer_hi)
             cable_lengths[cable_name] = physical_value
@@ -1137,7 +1143,7 @@ def update_network_params_from_posterior(posterior_means):
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_name in posterior_means:
             norm_val = posterior_means[cable_name]
-            min_val, max_val = cable_info.get("infer_range", cable_info["range"])
+            min_val, max_val = cable_info["range"]
             physical_val = denormalize(norm_val, min_val, max_val)
             old_val = cable_info["value"]
             cable_info["value"] = physical_val
@@ -1165,7 +1171,7 @@ def set_network_params_from_normalized(sampled_theta, param_order_list):
             counter = counter + 1
         else: 
             cable_name = params[1]
-            min, max = network_params["cable_lengths"][cable_name]["infer_range"]
+            min, max = network_params["cable_lengths"][cable_name]["range"]
             network_params["cable_lengths"][cable_name]["value"] = denormalize(sampled_theta[counter], min, max).item()
             counter = counter + 1    
 
@@ -1190,7 +1196,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
         torch.optim.lr_scheduler.CosineAnnealingWarmRestarts,
         {'optimizer': torch.optim.Adam, 'optim_args': {'lr': LR}, 'T_0': 200}
     )
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=15))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
 
     #call guide to initialize params
     guide(H1_noisy, std_f)
@@ -1206,7 +1212,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
                 lo, hi = network_params["loads"][load_name][param_name]["range"]
                 physical_val = network_params["loads"][load_name][param_name]["value"]
             else:
-                lo, hi = network_params["cable_lengths"][key]["infer_range"]
+                lo, hi = network_params["cable_lengths"][key]["range"]
                 physical_val = network_params["cable_lengths"][key]["value"]
 
             true_norm = (physical_val - lo) / (hi - lo)
@@ -1217,20 +1223,27 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
             print(f"{key:40s} (sigmoid) = {sig.item():.4f} | True = {true_norm:.4f}")
             
     losses = []
-    param_history = defaultdict(list)  # Contains Python floats not tensors (more memory efficient)
+    best_loss = float("inf")
+    best_params = None
 
     for step in range(num_steps):
         loss = svi.step(H1_noisy, std_f)
         #scheduler.step()  # Updates LR according to cosine annealing with warm restarts
         losses.append(loss)
-
+        
         # # Manual optimizer reset (commented out - using scheduler instead)
         # if step == 200:
         #     optimizer = pyro.optim.Adam({"lr": LR})
         #     svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=10))
         #     print(f"\n===== OPTIMIZER RESET at step {step} =====")
+        if loss < best_loss:
+            best_loss = loss
+            best_params = {
+                name: value.detach().clone()
+                for name, value in pyro.get_param_store().items()
+        }
 
-        if step % 50 == 0:
+        if step % 25 == 0:
             print(f"\n===== SNR {snr_db} | m = {m+1}/{M} | Step {step} | ELBO: {loss:.6f} =====")
             print("\n Top 10 Most Sensitive Parameters")
 
@@ -1256,22 +1269,169 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
                         lo, hi = network_params["loads"][load_name][param_name]["range"]
                         physical_val = network_params["loads"][load_name][param_name]["value"]
                     else:
-                        lo, hi = network_params["cable_lengths"][key]["infer_range"]
+                        lo, hi = network_params["cable_lengths"][key]["range"]
                         physical_val = network_params["cable_lengths"][key]["value"]
                     true_norm = (physical_val - lo) / (hi - lo)
                     print(f"{key:40s} (sigmoid) = {torch.sigmoid(param_store[store_key]):.4f} | True = {true_norm:.4f}")
-
-    #Store last step value only
+    # Restore best params into Pyro param store
     param_store = pyro.get_param_store()
-    for name, value in param_store.items():
-        param_history[name] = [value.detach().item()]  
+    for name, value in best_params.items():
+        param_store[name] = value.clone()
+        
+    # Convert best_params into old param_history format:
+    # key -> [single best value]
+    best_param_history = {
+        name: [value.detach().cpu().item()]
+        for name, value in best_params.items()
+    }
+
+    print(f"\n===== BEST PARAMS | SNR {snr_db} | m = {m+1}/{M} | Best Loss (-ELBO): {best_loss:.6f} =====")
+    print("\n Top 10 Most Sensitive Parameters")
+
+    for key in sorted_keys[:10]:
+        store_key = key.replace(".", "_") + "_loc"
+
+        if store_key in best_params:
+            if "." in key:
+                load_name, param_name = key.split(".")
+                lo, hi = network_params["loads"][load_name][param_name]["range"]
+                physical_val = network_params["loads"][load_name][param_name]["value"]
+            else:
+                lo, hi = network_params["cable_lengths"][key]["range"]
+                physical_val = network_params["cable_lengths"][key]["value"]
+
+            true_norm = (physical_val - lo) / (hi - lo)
+            sig = torch.sigmoid(best_params[store_key]).item()
+
+            print(f"{key:40s} (sigmoid) = {sig:.4f} | True = {true_norm:.4f}")
+
     print("Inference complete.")
-    return losses, param_history
+    return losses, best_param_history
 
-
-def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, top_p, scenario):
+def remove_correlated_parameters(selected_params, cosine_similarity_matrix, threshold=0.94):
     """
-    Perform sensitivity analysis on network parameters.
+    Given cosine similarity matrix of top p most sensitive parameters, 
+    remove parameters that are highly correlated >= threshold.
+    """
+    remove_indices = set()
+    p = len(selected_params)
+
+    for i in range(p):
+        if i in remove_indices:
+            continue
+        for j in range(i + 1, p):
+            if j in remove_indices:
+                continue
+
+            val = cosine_similarity_matrix[i, j]
+            if abs(val) >= threshold:
+                print(f"High correlation: {selected_params[i]} vs {selected_params[j]} = {val:.4f}")
+                print(f"Removing {selected_params[j]} (less sensitive)")
+                remove_indices.add(j)
+
+    # Turn off inference for removed parameters
+    # for idx in remove_indices:
+    #     param_key = selected_params[idx]
+    #     if "." in param_key:
+    #         # Load parameter: "load_11.C_m_leak"
+    #         parts = param_key.split(".")
+    #         load_name = parts[0]
+    #         param_name = parts[1]
+    #         network_params["loads"][load_name][param_name]["inferred"] = False
+    #     else:
+    #         # Cable length parameter
+    #         network_params["cable_lengths"][param_key]["inferred"] = False
+    #     print(f"Set inferred=False for {param_key}")
+
+    # # Build new list (cleaner than popping)
+    # selected_new = [selected_params[i] for i in range(p) if i not in remove_indices]
+    # p_new = len(selected_new)
+
+    # print(f"Kept {p_new}/{p} parameters: {selected_new}")
+    return p, selected_s1
+    return p_new, selected_new
+
+def perform_local_sensitivity_analysis(top_p, scenario):
+    """
+    Perform LOCAL sensitivity analysis at the specific θ_true point using Jacobians.
+    
+    Unlike global sensitivity which sweeps the entire range, this computes
+    the gradient ∂H/∂θ at the current parameter values.
+
+    Args:
+        top_p: Number of top most sensitive parameters to select
+        scenario: "no_fault" or "with_fault"
+
+    Returns:
+        selected_keys: List of top p most sensitive params sorted by sensitivity
+        sorted_keys: List of all params sorted from most sensitive to least sensitive
+        sensitivities: List of sensitivity values (%) corresponding to sorted_keys
+    """
+    # Use float64 for FIM/CLRB computation (better numerical precision)
+    params_flat = get_true_param_flat().double()
+    param_order, _ = get_inferred_param_order()
+
+    # Wrapper that ensures float64 output
+    def H_nofault_wrapper_f64(params):
+        param_order, _ = get_inferred_param_order()
+        cable_lengths, load_params = build_params_from_flat(params, param_order)
+        H = calculate_Hnw_nofault(cable_lengths, load_params)
+        # Convert to complex128 and stack
+        H = H.to(torch.complex128)
+        return torch.stack([H.real, H.imag], dim=-1)
+
+    # Compute Jacobian dH/dtheta in float64
+    J = jacfwd(H_nofault_wrapper_f64)(params_flat)  # [F, 2, P]
+    n_freq = J.shape[0]
+    n_params = J.shape[2]
+    J_flat = J.reshape(n_freq * 2, n_params)  # [F*2, P]
+    
+    # Sensitivity = norm of each column (each parameter's Jacobian)
+    sensitivities_raw = torch.norm(J_flat, dim=0)  # [P]
+    # Normalize to percentages
+    sensitivities_normalized = sensitivities_raw / sensitivities_raw.sum()
+
+    # Build parameter key list from param_order
+    param_keys = []
+    for item in param_order:
+        if item[0] == 'cable':
+            # ('cable', 'l_w_0', None)
+            param_keys.append(item[1])
+        elif item[0] == 'load':
+            # ('load', 'load_0', 'C_m_leak')
+            param_keys.append(f"{item[1]}.{item[2]}")
+        elif item[0] == 'fault':
+            # ('fault', 'Z_fault_real', None)
+            param_keys.append(item[1])
+    
+    # Create dict mapping param_key -> sensitivity
+    sensitivity_dict = {param_keys[i]: sensitivities_normalized[i].item() 
+                        for i in range(n_params)}
+    
+    # Sort by sensitivity (descending)
+    sorted_params = sorted(sensitivity_dict.keys(), 
+                          key=lambda k: sensitivity_dict[k], 
+                          reverse=True)
+    
+    # Select top p
+    selected = sorted_params[:p]
+
+    # Build sensitivities list in sorted order (as percentages)
+    sensitivities = [sensitivity_dict[k] * 100 for k in sorted_params]
+    
+    # Print results
+    print("\n--- LOCAL Sensitivity Analysis (at θ_true) ---")
+    for idx, k in enumerate(sorted_params):
+        if idx == p:
+            print(f"--- Top {p} selected above this line ---")
+        print(f"{k}: {sensitivity_dict[k]*100:.5f}%")
+    
+    print(f"\nSelected top {p} most sensitive parameters: {selected}")
+    print(f"Number of selected parameters: {len(selected)}")
+
+def perform_global_sensitivity_analysis(load_params, fault_params, cable_lengths, top_p, scenario):
+    """
+    Perform global sensitivity analysis on network parameters.
 
     Args:
         load_params: Load parameters dict
@@ -1328,7 +1488,7 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
         if not cable_info["inferred"]:
             continue
 
-        lo, hi = cable_info["infer_range"]
+        lo, hi = cable_info["range"]
         values = np.linspace(lo, hi, 10)
         param_variations = []
 
@@ -1424,6 +1584,161 @@ def perform_load_sensitivity_analysis(load_params, fault_params, cable_lengths, 
     sorted_keys = sorted_params  # Already sorted
     # selected is already sorted (first p elements of sorted_params)
     return selected, sorted_keys, sensitivities
+
+def print_cosine_similarity_matrix(param_keys, cosine_matrix, threshold=0.94):
+    """Print cosine similarity matrix in a readable format."""
+    
+    print("\n" + "="*70)
+    print("JACOBIAN COSINE SIMILARITY ANALYSIS")
+    print("="*70)
+    
+    n_params = len(param_keys)
+    
+    # Shorten parameter names for display
+    def shorten_name(name, max_len=12):
+        if "." in name:
+            parts = name.split(".")
+            # e.g., "load_0.C_m_leak" -> "L0.Cm"
+            load_part = parts[0].replace("load_", "L")
+            param_part = parts[1].replace("_leak", "").replace("_const", "")
+            return f"{load_part}.{param_part}"[:max_len]
+        return name[:max_len]
+    
+    short_keys = [shorten_name(k) for k in param_keys]
+    
+    # Find high correlations first
+    high_corrs = []
+    for i in range(n_params):
+        for j in range(i+1, n_params):
+            val = cosine_matrix[i, j].item() if hasattr(cosine_matrix[i, j], 'item') else cosine_matrix[i, j]
+            if abs(val) > threshold:
+                high_corrs.append((param_keys[i], param_keys[j], val))
+    
+    # Print high correlations summary first
+    if high_corrs:
+        print(f"\n⚠️  HIGH CORRELATIONS (|r| > {threshold}):")
+        print("-" * 50)
+        for k1, k2, val in sorted(high_corrs, key=lambda x: -abs(x[2])):
+            print(f"  {k1:<25} ↔ {k2:<25} r={val:+.4f}")
+        print("-" * 50)
+    else:
+        print(f"\n✓ No correlations above {threshold}")
+    
+    # For large matrices, print in blocks
+    block_size = 8  # Number of columns per block
+    n_blocks = (n_params + block_size - 1) // block_size
+    
+    print(f"\nFull correlation matrix ({n_params}x{n_params}):")
+    
+    for block in range(n_blocks):
+        col_start = block * block_size
+        col_end = min((block + 1) * block_size, n_params)
+        
+        if n_blocks > 1:
+            print(f"\n--- Columns {col_start+1}-{col_end} of {n_params} ---")
+        
+        # Header row
+        print(f"{'':>18}", end="")
+        for j in range(col_start, col_end):
+            print(f"{short_keys[j]:>10}", end="")
+        print()
+        
+        # Separator
+        print(f"{'':>18}" + "-" * (10 * (col_end - col_start)))
+        
+        # Data rows
+        for i in range(n_params):
+            print(f"{short_keys[i]:>16} |", end="")
+            for j in range(col_start, col_end):
+                val = cosine_matrix[i, j].item() if hasattr(cosine_matrix[i, j], 'item') else cosine_matrix[i, j]
+                if i == j:
+                    print(f"{'---':>10}", end="")  # Diagonal
+                elif abs(val) > threshold:
+                    print(f"{val:>9.3f}*", end="")  # High correlation
+                elif abs(val) > 0.7:
+                    print(f"{val:>9.3f}°", end="")  # Moderate
+                else:
+                    print(f"{val:>10.3f}", end="")
+            print()
+    
+    print("="*70)
+    
+    return high_corrs
+def compute_jacobian_cosine_similarity(param_keys, scenario="no_fault"):
+    """
+    Compute cosine similarity between Jacobian columns for specified parameters.
+
+    Each Jacobian column J_i = ∂H/∂θ_i is a vector over frequencies.
+    Cosine similarity measures if two parameters affect H in the same "direction"
+    (same frequency pattern) regardless of magnitude.
+
+    Uses jacfwd (automatic differentiation) for exact gradients.
+
+    Args:
+        param_keys: List of sensitive parameter keys from most to least to analyze (e.g., ["load_11.C_m_leak", "load_15.C_m_leak"])
+        scenario: "no_fault" or "with_fault"
+
+    Returns:
+        jacobians: Dict mapping param_key -> Jacobian column (complex vector over frequencies)
+        cosine_matrix: 2D numpy array of cosine similarities between all pairs
+    """
+    # Get true parameter values as flat tensor
+    params_flat = get_true_param_flat().double()
+    param_order, _ = get_inferred_param_order()
+
+    # Build mapping from param_key to param_order 
+    # (param_key always most sensitive -> least sensitive)
+    # (param_order always cable first then loads parameters)
+    key_to_idx = {}
+    for i, (ptype, name, subname) in enumerate(param_order):
+        if ptype == "cable":
+            key_to_idx[name] = i
+        elif ptype == "load":
+            key_to_idx[f"{name}.{subname}"] = i
+    
+    # Wrapper for jacfwd
+    def H_wrapper(params):
+        cl, lp = build_params_from_flat(params, param_order)
+        if scenario == "with_fault":
+            H = calculate_Hnw(cl, lp, fault_params)
+        else:
+            H = calculate_Hnw_nofault(cl, lp)
+        H = H.to(torch.complex128)
+        return torch.stack([H.real, H.imag], dim=-1)  # [F, 2]
+
+    # Compute full real Jacobian using automatic differentiation in param_order 
+    J_full = jacfwd(H_wrapper)(params_flat)  # [F, 2, P]
+    # Create dict of complex Jacobian columns [F] in order of param_keys
+    jacobians = {}
+    for key in param_keys:
+        idx = key_to_idx[key]
+        # J_full[:, :, idx] is [F, 2] - real and imag parts
+        J_col = torch.complex(J_full[:, 0, idx], J_full[:, 1, idx])  # [F] complex
+        jacobians[key] = J_col
+
+    # Compute cosine similarity matrix betwen param_keys
+    n_params = len(param_keys)
+    cosine_matrix = np.zeros((n_params, n_params))
+
+    for i, key_i in enumerate(param_keys):
+        J_i = jacobians[key_i]
+        # Flatten complex to real: [Re(J), Im(J)]
+        J_i_real = torch.cat([J_i.real.flatten(), J_i.imag.flatten()])
+        norm_i = torch.linalg.norm(J_i_real)
+
+        for j, key_j in enumerate(param_keys):
+            J_j = jacobians[key_j]
+            J_j_real = torch.cat([J_j.real.flatten(), J_j.imag.flatten()])
+            norm_j = torch.linalg.norm(J_j_real)
+
+            # Cosine similarity
+            if norm_i > 0 and norm_j > 0:
+                cosine_matrix[i, j] = (torch.dot(J_i_real, J_j_real) / (norm_i * norm_j)).item()
+            else:
+                cosine_matrix[i, j] = 0.0
+    
+    print_cosine_similarity_matrix(param_keys, cosine_matrix)
+    return jacobians, cosine_matrix
 
 
 #CRLB helper functions
@@ -1593,7 +1908,7 @@ def compute_real_FIM(var_f):
     # FIM should be real - take real part (imag should be ~0 due to numerics)
     I = ((1 / var_f_64) * I_f.sum(dim=0)).real  # [P, P] real and should be symmetric + PSD
     I2 = D.T @ I @ D
-    return I2
+    return I2, I
 
 def compute_real_CRLB(var_f, sorted_keys_s1, sensitivities):
     """
@@ -1609,15 +1924,42 @@ def compute_real_CRLB(var_f, sorted_keys_s1, sensitivities):
         CRLB_S2: [] depends on span of null space but will be < P. Dict of Cramér-Rao Lower Bounds for alpha = S2 theta
     """
     param_order_list, _ = get_inferred_param_order()
-    I2 = compute_real_FIM(var_f) #[p, p] Normalized FIM in [0, 1] space for all parameters
+    I2, I = compute_real_FIM(var_f) #[p, p] Normalized FIM in [0, 1] space for all parameters
+    diag_sqrt = torch.sqrt(torch.diag(I))
+    D_inv = torch.diag(1.0 / diag_sqrt)
+    R = D_inv @ I @ D_inv  # Correlation matrix = cosine similarities
+    # print("correlation matrix", R)
+    eps=1e-12
+    eigvals, eigvecs = torch.linalg.eigh(I)
+    print("Eigvals of FIM (descending)", torch.sort(eigvals, descending=True).values)
+    eigvals = torch.sort(eigvals, descending=True).values
+    lambda_max = eigvals[0]
+    lambda_min = eigvals[-1]
+    condition_number = lambda_max / lambda_min
+    print("lambda_min", lambda_min)
+    print("lambda_max", lambda_max)
+    print("condition number", condition_number)
     #Normalized FIM
     eigvals2, eigvecs2 = torch.linalg.eigh(I2) 
-    dimension2 = I2.shape[0]
-    rank2 = torch.linalg.matrix_rank(I2)
-    print("Rank of Normalized FIM", rank2)
-    singular2 = rank2 < dimension2
-    print("Normalized FIM is singular?", singular2)
     print("Eigvals of Normalized FIM (descending)", torch.sort(eigvals2, descending=True).values)
+    eigvals2 = torch.sort(eigvals2, descending=True).values
+    v_min = eigvecs2[:, 0]
+
+    for name, coeff in zip(param_order_list, v_min):
+        print(f"{str(name):30s} {coeff.item(): .4f}")
+    lambda_max2 = eigvals2[0]
+    lambda_min2 = eigvals2[-1]
+    condition_number2 = lambda_max2 / lambda_min2
+    print("lambda_min2", lambda_min2)
+    print("lambda_max2", lambda_max2)
+    print("condition number2", condition_number2)
+    
+    # dimension2 = I2.shape[0]
+    # rank2 = torch.linalg.matrix_rank(I2)
+    # print("Rank of Normalized FIM", rank2)
+    # singular2 = rank2 < dimension2
+    # print("Normalized FIM is singular?", singular2)
+    
 
     U, S, Vh = torch.linalg.svd(I2)
     
@@ -1918,7 +2260,7 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
                 true_val = (physical_val - lo) / (hi - lo)  # Normalize to [0,1]
             else:
                 # Cable parameter: "l_w_4"
-                lo, hi = network_params["cable_lengths"][key]["infer_range"]
+                lo, hi = network_params["cable_lengths"][key]["range"]
                 physical_val = network_params["cable_lengths"][key]["value"]
                 true_val = (physical_val - lo) / (hi - lo)  # Normalize to [0,1]
 
@@ -2098,7 +2440,7 @@ def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, num_samples=200):
         for cable_name, cable_info in network_params["cable_lengths"].items():
             pyro_key = f"{cable_name}_loc"
             if pyro_key in param_history:  # Check if was inferred
-                lo, hi = cable_info.get("infer_range", cable_info["range"])
+                lo, hi = cable_info["range"]
                 loc = param_history[pyro_key][-1]
                 scale = param_history[f"{cable_name}_scale"][-1]
                 z = np.random.normal(loc, scale)
@@ -2176,11 +2518,12 @@ if __name__ == '__main__':
         network_params["fault_parameters"][fault_name]["inferred"] = False
 
     p = 10
-    seed = 59
-    M = 10 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+    seed = 62
+    M = 1 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
     M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
     alpha = 5.0
-    param_order_list, P = get_inferred_param_order() #P = 119 total number of params
+    param_order_list, P = get_inferred_param_order() #P = total number of params
+    #p = P
     g = torch.Generator()
     g.manual_seed(seed)
     theta_true3 = torch.full([P], 0.25)
@@ -2193,12 +2536,6 @@ if __name__ == '__main__':
         torch.manual_seed(seed + i)  # Different seed per param but reproducible
         theta_true2[i] = beta_dist.sample()
 
-    print("theta beta", theta_true2)
-    #theta_true = torch.rand(P, generator=g)
-    print("theta uniform", theta_true)
-
-    # theta_true4: load params = 0.25, cable params = Beta(5,5)
-    # param_order_list contains tuples: ("cable", name, None) or ("load", load_name, param_name)
     theta_true4 = torch.zeros(P)
     for i, param_tuple in enumerate(param_order_list):
         if param_tuple[0] == "cable":  # Cable length parameter
@@ -2206,23 +2543,97 @@ if __name__ == '__main__':
             theta_true4[i] = beta_dist.sample()
         else:  # Load parameter
             theta_true4[i] = 0.25
-    print("theta_true4 (loads=0.25, cables=Beta):", theta_true4)
-    
-    #theta_true = torch.rand(P)  # Sample from Uniform[0,1] for each parameter
-    set_network_params_from_normalized(theta_true4, param_order_list)
+
+    set_network_params_from_normalized(theta_true2, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    print("cable lengths", network_params["cable_lengths"])
-    selected_s1, sorted_keys_s1, sensitivities = perform_load_sensitivity_analysis(
+    perform_local_sensitivity_analysis(p, scenario="no_fault")
+
+    selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(
         load_params, fault_params, cable_lengths, p, scenario="no_fault"
     )
     
+    print("network cable legnths", network_params["cable_lengths"])
+    # Replace load_11.C_m_leak with load_8.C_m_leak to test if load_11 causes compensation
+    # if "load_11.C_m_leak" in selected_s1:
+    #     # Turn off inference for load_11.C_m_leak
+    #     network_params["loads"]["load_11"]["C_m_leak"]["inferred"] = False
+    #     # Turn on inference for load_8.C_m_leak
+    #     network_params["loads"]["load_8"]["C_m_leak"]["inferred"] = True
+    #     # Replace in selected_s1
+    #     selected_s1 = [key if key != "load_11.C_m_leak" else "load_8.C_m_leak" for key in selected_s1]
+    #     print(f"Replaced load_11.C_m_leak with load_8.C_m_leak in selected parameters")
+    #     print(f"New selected_s1: {selected_s1}")
+
+    jacobians, csm = compute_jacobian_cosine_similarity(
+        selected_s1, scenario='no_fault'
+    )
+    
+    # p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
+    
+    # top_7_9 = sorted_keys_s1[:7] + sorted_keys_s1[8:9]
+    # print("top_7_9", top_7_9)
+    # # Check cosine similarity among top 7 + 9
+    # print(f"\n{'='*70}")
+    # print("ANALYSIS: Top 7 + 9 parameters")
+    # print('='*70)
+    # jacobians_7, cosine_7 = compute_jacobian_cosine_similarity(
+    #     top_7_9, scenario='no_fault'
+    # )
+    
+
+    # top_8 = sorted_keys_s1[:8]
+
+    # # Check cosine similarity among top 7 (the working case)
+    # print(f"\n{'='*70}")
+    # print("ANALYSIS: Top 7 parameters (p=7 case that WORKS)")
+    # print('='*70)
+    # top_7 = sorted_keys_s1[:7]
+    # jacobians_7, cosine_7 = compute_jacobian_cosine_similarity(
+    #     top_7, scenario='no_fault'
+    # )
+
+    # # Find max off-diagonal similarity
+    # max_sim_7 = 0
+    # for i in range(7):
+    #     for j in range(i+1, 7):
+    #         if abs(cosine_7[i,j]) > max_sim_7:
+    #             max_sim_7 = abs(cosine_7[i,j])
+    #             pair_7 = (top_7[i], top_7[j])
+    # print(f"\nMax pairwise similarity among top 7: {max_sim_7:.4f} ({pair_7[0]} vs {pair_7[1]})")
+
+    # # Now check what happens when we add the 8th parameter
+    # print(f"\n{'='*70}")
+    # print("ANALYSIS: Top 8 parameters (p=8 case that FAILS)")
+    # print('='*70)
+    # param_8 = sorted_keys_s1[7]
+    # print(f"8th parameter being added: {param_8}")
+
+    # jacobians_8, cosine_8 = compute_jacobian_cosine_similarity(
+    #     cable_lengths, load_params, top_8, scenario='no_fault', delta=0.01
+    # )
+
+    # # Check similarity of 8th param with each of the first 7
+    # print(f"\nSimilarity of {param_8} with each of the top 7:")
+    # for i in range(7):
+    #     sim = cosine_8[7, i]  # 8th param (index 7) vs each of first 7
+    #     marker = " <-- HIGH!" if abs(sim) > 0.85 else ""
+    #     print(f"  {param_8} vs {top_7[i]}: {sim:.4f}{marker}")
+
+    
+    # Analyze Jacobian cosine similarity for load_11, load_15, and load_8
+    # This tests whether load_11 and load_15 have similar "directions" (enabling compensation)
+    # while load_8 has a different direction (no compensation)
+    # params_to_compare = ["load_11.C_m_leak", "load_15.C_m_leak", "load_8.C_m_leak"]
+    # jacobians, cosine_matrix = compute_jacobian_cosine_similarity(
+    #     cable_lengths, load_params, params_to_compare, scenario="no_fault"
+    # )
 
 
-    #snr_dbs = [40]
+    # snr_dbs = [40]
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
