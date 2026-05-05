@@ -1417,7 +1417,6 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
 
     # Average squared errors
     mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
-    
     return mse_dict
 
 def print_cosine_similarity_matrix(param_keys, cosine_matrix, threshold=0.94):
@@ -2239,8 +2238,8 @@ if __name__ == '__main__':
     )
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    #snr_dbs = [40]
-    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs = [40]
+    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
