@@ -1,15 +1,8 @@
-# Limit threads to prevent oversubscription on Linux servers
 import os
-os.environ["OMP_NUM_THREADS"] = "4"
-os.environ["MKL_NUM_THREADS"] = "4"
-os.environ["OPENBLAS_NUM_THREADS"] = "4"
-os.environ["NUMEXPR_NUM_THREADS"] = "4"
-
 import numpy as np
 import random
 import pyro
 import torch
-torch.set_num_threads(4)  # Also limit PyTorch threads
 import copy
 import math
 import pandas as pd
@@ -2268,7 +2261,8 @@ if __name__ == '__main__':
     print(torch.__config__.show())
     print(torch.get_num_threads())
     print(torch.get_num_interop_threads())
-    ada
+    
+    
     p = 10
     seed = 85
     M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
@@ -2301,6 +2295,10 @@ if __name__ == '__main__':
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
+    t0 = time.time()
+    J = jacfwd(H_nofault_wrapper_f64)(params_flat)
+    print("One jacfwd time:", time.time() - t0)
+    ada
     #selected_s1 = ['load_1.C_m_leak', 'load_0.C_m_leak', 'load_20.C_m_leak', 'load_9.C_m_leak', 'load_11.C_m_leak',
      #               'load_3.C_m_leak', 'load_15.C_m_leak', 'load_8.C_m_leak', 'load_2.C_leak', 'load_6.C_m_leak']
     selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
