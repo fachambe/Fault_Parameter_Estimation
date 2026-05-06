@@ -1241,7 +1241,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
     
     #optimizer = pyro.optim.SGD({"lr": 1e-6})
     #optimizer = pyro.optim.SGD({"lr": 0.0001, "momentum": 0.9})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=12, vectorize_particles=True))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20, vectorize_particles=True))
     #svi = SVI(model, guide, optimizer, loss =TraceMeanField_ELBO(num_particles=50, vectorize_particles=True))
     #call guide to initialize params
     guide(H1_noisy, std_f)
@@ -2253,7 +2253,7 @@ if __name__ == '__main__':
 
     p = 10
     seed = 85
-    M = 100 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+    M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
     M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
     alpha = 5.0
     param_order_list, P = get_inferred_param_order() #P = total number of params
