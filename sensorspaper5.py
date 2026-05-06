@@ -1,7 +1,15 @@
+# Limit threads to prevent oversubscription on Linux servers
+import os
+os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["MKL_NUM_THREADS"] = "4"
+os.environ["OPENBLAS_NUM_THREADS"] = "4"
+os.environ["NUMEXPR_NUM_THREADS"] = "4"
+
 import numpy as np
 import random
 import pyro
 import torch
+torch.set_num_threads(4)  # Also limit PyTorch threads
 import copy
 import math
 import pandas as pd
@@ -2091,17 +2099,21 @@ def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
 
 def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
     """
-    Compute Bayesian MSE via Monte Carlo at specific SNR. 
-    
+    Compute Bayesian MSE via Monte Carlo at specific SNR.
+
     For each trial:
       1. Sample θ_true ~ Beta(α, α)
       2. Generate data y ~ p(y|θ_true)
       3. Run SVI to get estimate θ̂
       4. Compute (θ̂ - θ_true)²
-    
+
     Returns:
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
+    # Set seeds for reproducibility
+    torch.manual_seed(seed)
+    pyro.set_rng_seed(seed)
+
     param_order_list, p = get_inferred_param_order()
     squared_errors = {key: [] for key in selected_s1}
     snr_lin = 10.0 ** (snr_db / 10.0)
@@ -2253,14 +2265,16 @@ if __name__ == '__main__':
     # # Try only inferring load parameters 
     # for cable_name in network_params["cable_lengths"]:
     #     network_params["cable_lengths"][cable_name]["inferred"] = False
-
+    print(torch.__config__.show())
+    print(torch.get_num_threads())
+    print(torch.get_num_interop_threads())
+    ada
     p = 10
     seed = 85
     M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
     M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
     alpha = 5.0
     param_order_list, P = get_inferred_param_order() #P = total number of params
-    #p = P
     g = torch.Generator()
     g.manual_seed(seed)
     theta_true3 = torch.full([P], 0.25)
@@ -2289,11 +2303,9 @@ if __name__ == '__main__':
 
     #selected_s1 = ['load_1.C_m_leak', 'load_0.C_m_leak', 'load_20.C_m_leak', 'load_9.C_m_leak', 'load_11.C_m_leak',
      #               'load_3.C_m_leak', 'load_15.C_m_leak', 'load_8.C_m_leak', 'load_2.C_leak', 'load_6.C_m_leak']
-    selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, M, "no_fault")
+    selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
-    # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(
-    #     cable_lengths, load_params, p
-    # )
+    # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params, p)
 #     comparison, warnings = compare_global_local_sensitivity(
 #     cable_lengths, load_params, top_p=10
 # )
