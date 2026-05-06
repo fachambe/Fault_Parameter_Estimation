@@ -1241,7 +1241,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
     
     #optimizer = pyro.optim.SGD({"lr": 1e-6})
     #optimizer = pyro.optim.SGD({"lr": 0.0001, "momentum": 0.9})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=20, vectorize_particles=True))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=12, vectorize_particles=True))
     #svi = SVI(model, guide, optimizer, loss =TraceMeanField_ELBO(num_particles=50, vectorize_particles=True))
     #call guide to initialize params
     guide(H1_noisy, std_f)
@@ -1316,7 +1316,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
     print("Inference complete.")
     return losses, best_param_history
 
-def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, num_samples=200):
+def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, is_Bayesian, num_samples=200):
     param_order_list, p = get_inferred_param_order()
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
@@ -1399,7 +1399,10 @@ def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, num_samples=200):
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    plt.savefig(f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf', dpi=300, bbox_inches='tight')
+    if is_Bayesian:
+        plt.savefig(f'bayesian_{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf', dpi=300, bbox_inches='tight')
+    else:
+        plt.savefig(f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf', dpi=300, bbox_inches='tight')
     plt.close()
 
     print(f"Saved figure to {snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf")
@@ -1441,7 +1444,7 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
 
         # Plot TF vs reconstructed TF from these posterior means - just plot for last one
         if m == M-1:
-            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db)
+            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db, True)
 
         # 4. Compute squared errors vs true theta
         for key in selected_s1:
@@ -2086,7 +2089,7 @@ def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
             print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
     return bcrlb_dict
 
-def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
+def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
     """
     Compute Bayesian MSE via Monte Carlo at specific SNR. 
     
@@ -2131,7 +2134,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
 
         # Plot TF vs reconstructed TF from these posterior means - just plot for last one
         if m == M-1:
-            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db)
+            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db, True)
 
         # 6. Compute squared errors vs sampled true θ
         for key in selected_s1:
@@ -2325,7 +2328,7 @@ if __name__ == '__main__':
 
         # Bayesian CRLB + BRMSE
         bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
-        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
         print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
         print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
