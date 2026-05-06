@@ -18,7 +18,7 @@ from torch.distributions import constraints
 from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.infer.autoguide import AutoMultivariateNormal, AutoGuideList, AutoNormal
 from scipy.linalg import expm
-from torch.func import jacfwd
+from torch.func import jacfwd, jacrev
 from pyro.optim import PyroLRScheduler
 from pyro.infer import TraceMeanField_ELBO
 
@@ -2202,13 +2202,6 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
         # Plot data
         ax.plot(snr_dbs, rmse_results[key], 'bo-', label=rmse_label, markersize=6)
         ax.plot(snr_dbs, crlb_results[key], 'r--s', label=crlb_label, linewidth=2, markersize=4)
-        
-        # # Prior std reference line (only for Bayesian)
-        # if is_bayesian:
-        #     prior_std = math.sqrt(1/12)  # For uniform [0,1]
-        #     ax.axhline(y=prior_std, color='green', linestyle=':', linewidth=1.5, 
-        #               alpha=0.7, label='Prior std')
-        
         ax.set_xlabel('SNR (dB)')
         ax.set_ylabel('Error')
         ax.set_title(key, fontsize=10)
@@ -2258,11 +2251,7 @@ if __name__ == '__main__':
     # # Try only inferring load parameters 
     # for cable_name in network_params["cable_lengths"]:
     #     network_params["cable_lengths"][cable_name]["inferred"] = False
-    print(torch.__config__.show())
-    print(torch.get_num_threads())
-    print(torch.get_num_interop_threads())
-    
-    
+
     p = 10
     seed = 85
     M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
@@ -2296,9 +2285,9 @@ if __name__ == '__main__':
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
     t0 = time.time()
-    J = jacfwd(H_nofault_wrapper_f64)(params_flat)
+    J = jacrev(H_nofault_wrapper_f64)(params_flat)
     print("One jacfwd time:", time.time() - t0)
-    ada
+    adad
     #selected_s1 = ['load_1.C_m_leak', 'load_0.C_m_leak', 'load_20.C_m_leak', 'load_9.C_m_leak', 'load_11.C_m_leak',
      #               'load_3.C_m_leak', 'load_15.C_m_leak', 'load_8.C_m_leak', 'load_2.C_leak', 'load_6.C_m_leak']
     selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
