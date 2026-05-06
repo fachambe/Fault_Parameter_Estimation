@@ -107,6 +107,7 @@ def H_nofault_wrapper_f64(params):
 num_loads = 22
 num_of_conductors = 4
 device = torch.device("cpu")
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 #frequencies = torch.logspace(torch.log10(torch.tensor(2e6)), torch.log10(torch.tensor(10e6)), 500) #2-10MHz
@@ -298,8 +299,13 @@ def calculate_room_admittance_matrix(Y_loads_room, cable_lengths_room, T_r, Tinv
 
 # Function to compute constant impedance admittance matrix (type 1)
 def constant_impedance(R_const, C_leak, omega):
-    Z12 = Z13 = Z23 = R_const * torch.ones_like(omega, dtype=torch.complex64)
-    ZG1 = ZG2 = ZG3 = 1 / (1j * omega * C_leak)
+    # When vectorize_particles=True, R_const and C_leak have shape [P, 1]
+    # omega has shape [F]. Result should be [P, F] or [F] depending on input.
+    ZG1 = 1 / (1j * omega * C_leak)
+    ZG2 = ZG3 = ZG1
+    # Ensure Z12 has same shape as ZG1 by using ones_like(ZG1) instead of ones_like(omega)
+    Z12 = R_const.to(torch.complex64) * torch.ones_like(ZG1)
+    Z13 = Z23 = Z12
     return Z12, Z13, Z23, ZG1, ZG2, ZG3
 
 # Function to compute double RLC admittance matrix (type 2)
@@ -326,18 +332,32 @@ def compute_load_admittance_3d(load_params):
 
     Parameters:
     - load_params (tuple of tensors): (Z12, Z13, Z23, ZG1, ZG2, ZG3)
-      Each impedance tensor has shape (N,) with dtype torch.complex64.
+      Each impedance tensor has shape (..., F) where ... are batch dims (e.g., particles).
+      Note: Different tensors may have different batch dims if only some params are sampled.
     Returns:
-    - Y_load (torch.Tensor): Load admittance matrix with shape (N, 3, 3)
+    - Y_load (torch.Tensor): Load admittance matrix with shape (..., F, 3, 3)
     """
     Z12, Z13, Z23, ZG1, ZG2, ZG3 = load_params  # Unpack impedance values
 
-    # Stack into a (N, 3, 3) tensor
-    Y_load = torch.stack([
-        torch.stack([1/ZG1 + 1/Z12 + 1/Z13, -1/Z12, -1/Z13], dim=-1),
-        torch.stack([-1/Z12, 1/ZG2 + 1/Z12 + 1/Z23, -1/Z23], dim=-1),
-        torch.stack([-1/Z13, -1/Z23, 1/ZG3 + 1/Z13 + 1/Z23], dim=-1)
-    ], dim=-2)  # Shape: (N, 3, 3)
+    # Compute admittance elements
+    Y11 = 1/ZG1 + 1/Z12 + 1/Z13
+    Y12 = -1/Z12
+    Y13 = -1/Z13
+    Y22 = 1/ZG2 + 1/Z12 + 1/Z23
+    Y23 = -1/Z23
+    Y33 = 1/ZG3 + 1/Z13 + 1/Z23
+
+    # Broadcast all elements to common shape before stacking
+    # This handles cases where only some parameters have particle batch dims
+    elements = [Y11, Y12, Y13, Y22, Y23, Y33]
+    target_shape = torch.broadcast_shapes(*[e.shape for e in elements])
+    Y11, Y12, Y13, Y22, Y23, Y33 = [e.expand(target_shape) for e in elements]
+
+    # Stack into (..., F, 3, 3) tensor using dim=-1 for columns, dim=-2 for rows
+    row1 = torch.stack([Y11, Y12, Y13], dim=-1)  # (..., F, 3)
+    row2 = torch.stack([Y12, Y22, Y23], dim=-1)  # (..., F, 3)
+    row3 = torch.stack([Y13, Y23, Y33], dim=-1)  # (..., F, 3)
+    Y_load = torch.stack([row1, row2, row3], dim=-2)  # (..., F, 3, 3)
     return Y_load
 
 
@@ -402,37 +422,56 @@ def reflection_coefficient(YL, T, T_inv, ZC, YC):
 def carry_back_load(rhoL, T, YC, Gamma, length):
     """
     Implements eq. (13) of Tonello paper.
-    Inputs: all (N, n, n) tensors, length is a scalar
-    Returns: Y_R(x) (N, n, n)
+    Inputs:
+        - rhoL: (..., F, n, n) - reflection coefficient, may have batch dims (particles)
+        - T, YC, Gamma: (F, n, n) - MTL matrices
+        - length: scalar or tensor with batch dims
+    Returns: Y_R(x) (..., F, n, n)
     """
+    # Reshape length for broadcasting with Gamma [F, n, n]
+    if isinstance(length, torch.Tensor) and length.dim() > 0:
+        # Add 3 dims for F, n, n: [...] -> [..., 1, 1, 1]
+        length_bc = length.view(*length.shape, 1, 1, 1)
+    else:
+        length_bc = length
+
     # Compute matrix exponentials
-    e_pos = torch.matrix_exp(Gamma * length)       # (N, n, n)
-    e_neg = torch.matrix_exp(-Gamma * length)      # (N, n, n)
+    e_pos = torch.matrix_exp(Gamma * length_bc)       # (..., F, n, n)
+    e_neg = torch.matrix_exp(-Gamma * length_bc)      # (..., F, n, n)
 
     # Compute numerator and denominator
-    num = e_pos + torch.matmul(e_neg, rhoL)        # (N, n, n)
-    den = e_pos - torch.matmul(e_neg, rhoL)        # (N, n, n)
-    deninv = torch.linalg.inv(den)                 # (N, n, n)
+    num = e_pos + torch.matmul(e_neg, rhoL)        # (..., F, n, n)
+    den = e_pos - torch.matmul(e_neg, rhoL)        # (..., F, n, n)
+    deninv = torch.linalg.inv(den)                 # (..., F, n, n)
 
-    # Compute final YR
+    # Compute final YR - broadcasting handles batch dims
     YR = T @ num @ deninv @ torch.linalg.inv(T) @ YC
     return YR
 
 def h_B(rhoL, ZC, T, T_inv, Gamma, length):
     """
     Implements eq. (14) of Tonello paper.
-    Inputs: all (N, n, n) tensors, length is scalar
-    Returns: h_B (N, n, n)
+    Inputs:
+        - rhoL: (..., F, n, n) - reflection coefficient, may have batch dims (particles)
+        - ZC, T, T_inv, Gamma: (F, n, n) - MTL matrices
+        - length: scalar or tensor with batch dims
+    Returns: h_B (..., F, n, n)
     """
-    N, n, _ = ZC.shape
+    n = ZC.shape[-1]
     device = ZC.device
 
-    # Identity matrix expanded for batch
-    U = torch.eye(n, dtype=torch.complex64, device=device).unsqueeze(0).expand(N, -1, -1)
+    # Identity matrix - will broadcast with rhoL
+    U = torch.eye(n, dtype=torch.complex64, device=device)
+
+    # Reshape length for broadcasting with Gamma [F, n, n]
+    if isinstance(length, torch.Tensor) and length.dim() > 0:
+        length_bc = length.view(*length.shape, 1, 1, 1)
+    else:
+        length_bc = length
 
     # Matrix exponentials
-    e_pos = torch.matrix_exp(Gamma * length)
-    e_neg = torch.matrix_exp(-Gamma * length)
+    e_pos = torch.matrix_exp(Gamma * length_bc)
+    e_neg = torch.matrix_exp(-Gamma * length_bc)
 
     den = e_pos - e_neg @ rhoL
     deninv = torch.linalg.inv(den)
@@ -446,23 +485,23 @@ def calculate_Htrans(YTalpha, YTbeta, YTgamma, Ynw, ZT0, ZT12, ZT21, ZT13, ZT31,
 
     Parameters:
     - YTalpha, YTbeta, YTgamma: Transmitter constants (scalar)
-    - Ynw: Network input admittance matrix (N, n, n)
+    - Ynw: Network input admittance matrix (..., F, n, n) - may have batch dims
     - ZT0, ZT12, ZT21, ZT13, ZT31, ZT23, ZT32: Transmitter constants (scalar)
 
     Returns:
-    - Htrans: Transfer function of transmitter (N, n, n)
+    - Htrans: Transfer function of transmitter (..., F, n, n)
     """
-    N = Ynw.shape[0]
-    # Extract individual elements
-    Ynw11 = Ynw[:, 0, 0].unsqueeze(1).unsqueeze(2)
-    Ynw12 = Ynw[:, 0, 1].unsqueeze(1).unsqueeze(2)
-    Ynw13 = Ynw[:, 0, 2].unsqueeze(1).unsqueeze(2)
-    Ynw21 = Ynw[:, 1, 0].unsqueeze(1).unsqueeze(2)
-    Ynw22 = Ynw[:, 1, 1].unsqueeze(1).unsqueeze(2)
-    Ynw23 = Ynw[:, 1, 2].unsqueeze(1).unsqueeze(2)
-    Ynw31 = Ynw[:, 2, 0].unsqueeze(1).unsqueeze(2)
-    Ynw32 = Ynw[:, 2, 1].unsqueeze(1).unsqueeze(2)
-    Ynw33 = Ynw[:, 2, 2].unsqueeze(1).unsqueeze(2)
+    # Extract individual elements using ... for arbitrary batch dims
+    # Ynw[..., i, j] gives shape (..., F), add two dims for matrix construction
+    Ynw11 = Ynw[..., 0, 0].unsqueeze(-1).unsqueeze(-1)
+    Ynw12 = Ynw[..., 0, 1].unsqueeze(-1).unsqueeze(-1)
+    Ynw13 = Ynw[..., 0, 2].unsqueeze(-1).unsqueeze(-1)
+    Ynw21 = Ynw[..., 1, 0].unsqueeze(-1).unsqueeze(-1)
+    Ynw22 = Ynw[..., 1, 1].unsqueeze(-1).unsqueeze(-1)
+    Ynw23 = Ynw[..., 1, 2].unsqueeze(-1).unsqueeze(-1)
+    Ynw31 = Ynw[..., 2, 0].unsqueeze(-1).unsqueeze(-1)
+    Ynw32 = Ynw[..., 2, 1].unsqueeze(-1).unsqueeze(-1)
+    Ynw33 = Ynw[..., 2, 2].unsqueeze(-1).unsqueeze(-1)
 
     H11 = 1 + ZT0 * Ynw11 + ZT0 * YTalpha
     H12 = ZT0 * Ynw12 - ZT0 / ZT12
@@ -474,13 +513,13 @@ def calculate_Htrans(YTalpha, YTbeta, YTgamma, Ynw, ZT0, ZT12, ZT21, ZT13, ZT31,
     H32 = ZT0 * Ynw32 - ZT0 / ZT32
     H33 = 1 + ZT0 * Ynw33 + ZT0 * YTgamma
 
-    # Stack rows, then the full batch
+    # Stack rows using dim=-1 for columns, dim=-2 for rows
     H_trans = torch.cat([
-        torch.cat([H11, H12, H13], dim=2),
-        torch.cat([H21, H22, H23], dim=2),
-        torch.cat([H31, H32, H33], dim=2)
-    ], dim=1)  # Resulting shape: (N, 3, 3)
-    H_trans_inv = torch.linalg.inv(H_trans)  # Shape: (N, 3, 3)
+        torch.cat([H11, H12, H13], dim=-1),
+        torch.cat([H21, H22, H23], dim=-1),
+        torch.cat([H31, H32, H33], dim=-1)
+    ], dim=-2)  # Resulting shape: (..., F, 3, 3)
+    H_trans_inv = torch.linalg.inv(H_trans)
 
     return H_trans_inv
 def compute_fault_admittance_matrix(Z_fault_real, Z_fault_imag, N, n, k=0):
@@ -722,24 +761,30 @@ def calculate_Hnw_nofault(cable_lengths, load_params):
     #hoverall = h1 @ h2
     hoverall = h1 @ h2 @ h3 @ h4 @ h5
     #hoverall = h5 @ h4 @ h3 @ h2 @ h1
-    H1 = hoverall @ H_trans 
-    #H_nw_magnitude_db_1 = 20 * torch.log10(torch.abs(H1[:, 0, 0]))    
-    H_nw = H1[:, 0, 0]
+    H1 = hoverall @ H_trans
+    # Use ... to handle arbitrary batch dimensions (e.g., particle dimension)
+    H_nw = H1[..., 0, 0]
     return H_nw
 
 
 def model_no_fault(H1_noisy, std_f):
     """
     Stage 1. Model with no fault
+
+    When vectorize_particles=True, samples have shape [P, ...] where P = num_particles.
+    The forward model output shape is [P, F] with particles or [F] without.
     """
     N, F, _ = H1_noisy.shape
+    # Beta distribution parameters on correct device
+    beta_conc = torch.tensor(5.0, device=device)
+
     # Sample/fix load parameters
     load_params = {}
     for load_name, params in network_params["loads"].items():
         load_dict = {}
         for param_name, param_info in params.items():
             if param_info["inferred"]:
-                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(5.0, 5.0))
+                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(beta_conc, beta_conc))
                 load_dict[param_name] = norm_sample
             else:
                 load_dict[param_name] = torch.tensor(param_info["value"], device=device)
@@ -750,14 +795,23 @@ def model_no_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            norm_sample = pyro.sample(f"{cable_name}", dist.Beta(5.0, 5.0))
+            norm_sample = pyro.sample(f"{cable_name}", dist.Beta(beta_conc, beta_conc))
             cable_lengths[cable_name] = norm_sample
         else:
             cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
 
-    H1_pred_c = calculate_Hnw_nofault(cable_lengths, load_params).unsqueeze(0).expand(N, -1)
-    H1_pred = torch.view_as_real(H1_pred_c)
+    # calculate_Hnw_nofault returns shape [..., F] where ... are batch dims (particles)
+    H1_pred_c = calculate_Hnw_nofault(cable_lengths, load_params)
 
+    # Handle both vectorized [P, F] and non-vectorized [F] cases
+    if H1_pred_c.dim() == 1:
+        # Non-vectorized: [F] -> [N, F]
+        H1_pred_c = H1_pred_c.unsqueeze(0).expand(N, -1)
+    else:
+        # Vectorized: [P, F] -> [P, N, F] (insert N before F)
+        H1_pred_c = H1_pred_c.unsqueeze(-2).expand(*H1_pred_c.shape[:-1], N, H1_pred_c.shape[-1])
+
+    H1_pred = torch.view_as_real(H1_pred_c)
 
     with pyro.plate("data", N):
         pyro.sample(
@@ -845,14 +899,14 @@ def extract_posterior_means(param_history, num_samples=2048):
 
     return posterior_means
 
+
 def set_network_params_from_normalized(sampled_theta, param_order_list):
     """
-    Update global network_params dict with sampled theta only for keys in param_order_list. 
+    Update global network_params dict with sampled theta only for inferred keys in param_order_list. 
     Args:
         sampled_theta: Sampled tensor of theta of shape [p] where theta in [0, 1]
     """
     counter = 0
-
     for params in param_order_list: 
         if params[0] == "load":
             entity_name = params[1]
@@ -999,7 +1053,7 @@ def get_inferred_param_order():
             - ("cable", cable_name, None) for cable lengths
             - ("load", load_name, param_name) for load parameters
         
-        num_params: Total number of inferred parameters
+        num_params: Total number of inferred parameters (p)
     """
     param_order = []
 
@@ -1185,19 +1239,9 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
     else:
         raise ValueError(f"Unknown optimizer: {OPTIMIZER}. Use 'Adam' or 'Adagrad'.")
     
-#     optimizer = pyro.optim.Adam({
-#     "lr": 0.005,
-#     "betas": (0.5, 0.999)
-# })
-#     optimizer = pyro.optim.ClippedAdam({
-#     "lr": 0.01,
-#     "betas": (0.5, 0.999),
-#     "clip_norm": 10.0,
-#     "lrd": 0.999
-# })
     #optimizer = pyro.optim.SGD({"lr": 1e-6})
     #optimizer = pyro.optim.SGD({"lr": 0.0001, "momentum": 0.9})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=12))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=12, vectorize_particles=True))
     #svi = SVI(model, guide, optimizer, loss =TraceMeanField_ELBO(num_particles=50, vectorize_particles=True))
     #call guide to initialize params
     guide(H1_noisy, std_f)
@@ -1391,12 +1435,13 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
         # 2. Run SVI inference 
         #auto_guide = AutoMultivariateNormal(model_no_fault)  # Full covariance guide
         losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M, num_steps)
-
+        
         # 3. Extract posterior means for this run
         posterior_means = extract_posterior_means(param_history)
 
-        # Plot TF vs reconstructed TF from these posterior means
-        plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db)
+        # Plot TF vs reconstructed TF from these posterior means - just plot for last one
+        if m == M-1:
+            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db)
 
         # 4. Compute squared errors vs true theta
         for key in selected_s1:
@@ -1967,11 +2012,11 @@ def compute_expected_data_fim(p, snr_db, alpha, num_samples=100):
         print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
         set_network_params_from_normalized(theta_samples[m], param_order_list)
 
-        # Compute H_clean for this θ
+        # Compute H_clean for this theta
         cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
         H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
         
-        # Compute var_f for THIS θ
+        # Compute var_f for this theta
         sigpow = torch.mean(torch.abs(H_clean)**2)
         var_f = sigpow / snr_lin
 
@@ -2012,28 +2057,35 @@ def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
 
     # Compute E[I(θ)]
     E_I = compute_expected_data_fim(p, snr_db, alpha, num_samples)
+    print("E_I shape", E_I.shape)
     print("E_I", E_I)
     
     # Compute J_π (prior FIM)
     J_pi = beta_prior_fim_closed_form(p, alpha)
     print("J_pi", J_pi)
+    print("J_pi shape", J_pi.shape)
     # Bayesian FIM
     J_B = E_I + J_pi
     
     # Bayesian CRLB
     BCRLB = torch.linalg.inv(J_B)
     bcrlb_diag_full = torch.diag(BCRLB)  # [p] in param_order_list order
-    
+    print("bcrlb_diag", bcrlb_diag_full)
+    print("shape", bcrlb_diag_full.shape)
     # Extract selected_keys subset in correct order
+    print("selected keys", selected_keys)
     bcrlb_dict = {}
+    param_order_list, _ = get_inferred_param_order()
     for key in selected_keys:
         key_tuple = key_to_tuple(key)
+        print("key_tuple", key_tuple)
         if key_tuple in param_order_list:
             idx = param_order_list.index(key_tuple)
             bcrlb_dict[key] = bcrlb_diag_full[idx].item()
         else:
             print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
-    
+    return bcrlb_dict
+
 def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
     """
     Compute Bayesian MSE via Monte Carlo at specific SNR. 
@@ -2072,23 +2124,32 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M):
         H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
         # 4. Run SVI to get estimate
         pyro.clear_param_store()
-        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, num_steps=300,
-                                               theta_true=theta_true_normalized, param_order_list=param_order_list)
+        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M, NUM_STEPS)
 
         # 5. Extract posterior mean
         posterior_means = extract_posterior_means(param_history)
 
+        # Plot TF vs reconstructed TF from these posterior means - just plot for last one
+        if m == M-1:
+            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db)
+
         # 6. Compute squared errors vs sampled true θ
         for key in selected_s1:
-            key_tuple = key_to_tuple(key)
-            idx = param_order_list.index(key_tuple)
-            true_val = theta_true_normalized[idx].item()
-            
+            # Get true value directly from network_params
+            if "." in key:
+                # Load parameter: "load_0.C_m_leak"
+                parts = key.split(".")
+                load_name, param_name = parts[0], parts[1]
+                true_val = network_params["loads"][load_name][param_name]["value"]
+            else:
+                # Cable parameter: "l_w_4"
+                true_val = network_params["cable_lengths"][key]["value"]
+
             posterior_key = key.replace(".", "_")
             if posterior_key in posterior_means:
                 estimate = posterior_means[posterior_key]
                 squared_errors[key].append((estimate - true_val)**2)
-    
+
     # Average squared errors
     bayesian_mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
     
@@ -2191,8 +2252,8 @@ if __name__ == '__main__':
     #     network_params["cable_lengths"][cable_name]["inferred"] = False
 
     p = 10
-    seed = 80
-    M = 25 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+    seed = 85
+    M = 100 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
     M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
     alpha = 5.0
     param_order_list, P = get_inferred_param_order() #P = total number of params
@@ -2217,15 +2278,16 @@ if __name__ == '__main__':
         else:  # Load parameter
             theta_true4[i] = 0.25
 
-    set_network_params_from_normalized(theta_true4, param_order_list)
+    set_network_params_from_normalized(theta_true2, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    #selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, M, "no_fault")
-    
-    selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
+    #selected_s1 = ['load_1.C_m_leak', 'load_0.C_m_leak', 'load_20.C_m_leak', 'load_9.C_m_leak', 'load_11.C_m_leak',
+     #               'load_3.C_m_leak', 'load_15.C_m_leak', 'load_8.C_m_leak', 'load_2.C_leak', 'load_6.C_m_leak']
+    selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, M, "no_fault")
+    # selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(
     #     cable_lengths, load_params, p
     # )
@@ -2238,8 +2300,8 @@ if __name__ == '__main__':
     )
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    snr_dbs = [40]
-    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    #snr_dbs = [40]
+    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
@@ -2255,32 +2317,32 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
         # Standard CRLB + RMSE
-        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, NUM_STEPS)
-        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+        # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, NUM_STEPS)
+        # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
 
         # Bayesian CRLB + BRMSE
-        #bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
-        #bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M2)
-        #print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        #print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
+       #  Store results for plotting
+        # for key in selected_s1:
+        #     if key in mse and key in crlb_u1u1t_dict:
+        #         rmse_results[key].append(math.sqrt(mse[key]))
+        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        
         # Store results for plotting
         for key in selected_s1:
-            if key in mse and key in crlb_u1u1t_dict:
-                rmse_results[key].append(math.sqrt(mse[key]))
-                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
         
-        # Store results for plotting
-        # for key in selected_s1:
-        #     if key in bayesian_mse and key in bcrlb_dict:
-        #         bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-        #         bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
-        
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
-                                is_bayesian=False, M=M)
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
+                                is_bayesian=True, M=M)
 
     
     print("My program took", time.time() - start_time, "to run")
