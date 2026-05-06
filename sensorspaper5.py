@@ -18,7 +18,7 @@ from torch.distributions import constraints
 from pyro.distributions.torch_distribution import TorchDistribution
 from pyro.infer.autoguide import AutoMultivariateNormal, AutoGuideList, AutoNormal
 from scipy.linalg import expm
-from torch.func import jacfwd, jacrev
+from torch.func import jacfwd
 from pyro.optim import PyroLRScheduler
 from pyro.infer import TraceMeanField_ELBO
 
@@ -1613,6 +1613,178 @@ def compute_jacobian_cosine_similarity(param_keys, scenario="no_fault"):
     print_cosine_similarity_matrix(param_keys, cosine_matrix)
     return jacobians, cosine_matrix
 
+def get_hardcoded_prior_averaged_sensitivity(top_p):
+    """
+    Return hardcoded prior-averaged sensitivity results.
+    These were computed with alpha=5.0, M=100, scenario='no_fault'.
+    """
+    # Full sorted results from prior-averaged sensitivity analysis
+    sorted_results = [
+        ('load_1.C_m_leak', 8.68658),
+        ('load_0.C_m_leak', 6.97147),
+        ('load_20.C_m_leak', 6.37758),
+        ('load_9.C_m_leak', 4.85971),
+        ('load_11.C_m_leak', 4.04881),
+        ('load_3.C_m_leak', 3.95357),
+        ('load_15.C_m_leak', 3.78257),
+        ('load_8.C_m_leak', 3.60297),
+        ('load_2.C_leak', 2.68051),
+        ('load_18.C_m_leak', 2.39607),
+        ('load_6.C_m_leak', 2.35984),
+        ('l_w_4', 2.18886),
+        ('l_w_1', 1.80019),
+        ('l_w_3', 1.74691),
+        ('load_1.C_m', 1.70522),
+        ('load_10.C_d_leak', 1.68185),
+        ('load_0.C_m', 1.52587),
+        ('load_4.C_d_leak', 1.52200),
+        ('load_16.C_d_leak', 1.39585),
+        ('l_w_25', 1.30044),
+        ('load_20.C_m', 1.25266),
+        ('l_w_27', 1.23077),
+        ('l_w_14', 1.21051),
+        ('load_2.R_const', 1.16353),
+        ('load_9.C_m', 1.13214),
+        ('load_13.C_leak', 1.12420),
+        ('l_w_9', 1.06501),
+        ('l_w_24', 1.05355),
+        ('load_14.C_leak', 1.02598),
+        ('load_21.C_leak', 1.02183),
+        ('l_w_28', 1.01057),
+        ('load_19.R_const', 0.97778),
+        ('load_19.C_leak', 0.96750),
+        ('load_12.C_leak', 0.86017),
+        ('load_8.C_m', 0.85428),
+        ('load_21.R_const', 0.85392),
+        ('load_3.C_m', 0.81064),
+        ('l_w_13', 0.79678),
+        ('l_w_11', 0.78732),
+        ('load_11.C_m', 0.78437),
+        ('l_w_19', 0.77782),
+        ('load_15.C_m', 0.77629),
+        ('l_w_6', 0.74965),
+        ('l_w_2', 0.73790),
+        ('l_w_21', 0.73499),
+        ('load_5.R_const', 0.71535),
+        ('load_17.R_const', 0.70384),
+        ('l_w_8', 0.69577),
+        ('l_w_23', 0.69296),
+        ('load_7.C_d_leak', 0.60021),
+        ('l_w_16', 0.57027),
+        ('l_w_18', 0.52377),
+        ('load_12.R_const', 0.50467),
+        ('l_w_0', 0.49631),
+        ('load_18.C_m', 0.48228),
+        ('load_6.C_m', 0.47494),
+        ('load_14.R_const', 0.43258),
+        ('l_w_12', 0.39367),
+        ('load_13.R_const', 0.36915),
+        ('load_5.C_leak', 0.35087),
+        ('load_17.C_leak', 0.34059),
+        ('l_w_5', 0.31935),
+        ('l_w_20', 0.29543),
+        ('l_w_15', 0.25940),
+        ('load_1.R_m1', 0.21191),
+        ('l_w_29', 0.18230),
+        ('load_0.R_m1', 0.14106),
+        ('load_9.R_m1', 0.12964),
+        ('load_15.R_m1', 0.11319),
+        ('load_3.R_m1', 0.11155),
+        ('l_w_17', 0.10954),
+        ('load_20.R_m1', 0.10464),
+        ('load_11.R_m1', 0.10218),
+        ('load_8.R_m1', 0.09050),
+        ('l_w_10', 0.08325),
+        ('load_10.omega_0s', 0.07585),
+        ('load_6.R_m1', 0.07472),
+        ('load_16.omega_0s', 0.07380),
+        ('load_4.omega_0s', 0.06890),
+        ('l_w_26', 0.05932),
+        ('load_1.L_m', 0.05340),
+        ('load_9.L_m', 0.04222),
+        ('load_0.L_m', 0.04117),
+        ('load_3.L_m', 0.04005),
+        ('load_15.L_m', 0.03579),
+        ('load_4.R_s', 0.03427),
+        ('load_10.R_s', 0.03305),
+        ('load_11.L_m', 0.03227),
+        ('load_16.R_s', 0.03207),
+        ('load_8.L_m', 0.03039),
+        ('load_18.L_m', 0.02921),
+        ('load_7.omega_0s', 0.02912),
+        ('load_6.L_m', 0.02846),
+        ('l_w_7', 0.02649),
+        ('load_20.L_m', 0.02483),
+        ('l_w_22', 0.02205),
+        ('load_4.zeta_s', 0.01913),
+        ('load_10.zeta_s', 0.01865),
+        ('load_16.zeta_s', 0.01823),
+        ('load_7.R_s', 0.01668),
+        ('load_7.zeta_s', 0.01321),
+        ('load_10.delta_1', 0.00174),
+        ('load_16.delta_1', 0.00162),
+        ('load_4.delta_1', 0.00162),
+        ('load_10.delta_2', 0.00083),
+        ('load_16.delta_2', 0.00078),
+        ('load_7.delta_1', 0.00076),
+        ('load_4.delta_2', 0.00074),
+        ('load_7.delta_2', 0.00045),
+        ('load_4.omega_0p', 0.00000),
+        ('load_16.R_p', 0.00000),
+        ('load_16.omega_0p', 0.00000),
+        ('load_10.omega_0p', 0.00000),
+        ('load_4.R_p', 0.00000),
+        ('load_4.zeta_p', 0.00000),
+        ('load_16.zeta_p', 0.00000),
+        ('load_10.R_p', 0.00000),
+        ('load_7.R_p', 0.00000),
+        ('load_10.zeta_p', 0.00000),
+        ('load_7.omega_0p', 0.00000),
+        ('load_7.zeta_p', 0.00000),
+    ]
+
+    sorted_keys = [k for k, _ in sorted_results]
+    sensitivities = [v for _, v in sorted_results]
+    selected_keys = sorted_keys[:top_p]
+
+    # Print results
+    print("\n--- Prior-Averaged Sensitivity Results (Hardcoded) ---")
+    for i, (key, sens) in enumerate(sorted_results):
+        print(f"{key}: {sens:.5f}%")
+        if i == top_p - 1:
+            print(f"--- Top {top_p} selected above this line ---")
+
+    # Set inferred=False for ALL parameters first
+    for cable_name in network_params["cable_lengths"]:
+        network_params["cable_lengths"][cable_name]["inferred"] = False
+    for load_name in network_params["loads"]:
+        for param_name in network_params["loads"][load_name]:
+            network_params["loads"][load_name][param_name]["inferred"] = False
+    if "fault_parameters" in network_params:
+        for fault_name in network_params["fault_parameters"]:
+            network_params["fault_parameters"][fault_name]["inferred"] = False
+
+    # Set inferred=True only for selected top_p parameters
+    enabled_count = 0
+    for param_key in selected_keys:
+        if "." in param_key:
+            # Load parameter: "load_0.C_m_leak"
+            parts = param_key.split(".")
+            load_name, param_name = parts[0], parts[1]
+            if load_name in network_params["loads"]:
+                if param_name in network_params["loads"][load_name]:
+                    network_params["loads"][load_name][param_name]["inferred"] = True
+                    enabled_count += 1
+        else:
+            # Cable length parameter
+            if param_key in network_params["cable_lengths"]:
+                network_params["cable_lengths"][param_key]["inferred"] = True
+                enabled_count += 1
+
+    print(f"\nEnabled inference for {enabled_count} parameters (top {top_p})")
+
+    return selected_keys, sorted_keys, sensitivities
+
 def perform_local_prior_averaged_sensitivity_analysis(top_p, alpha, M, scenario):
     """
     Sample M θ_nominal values from the prior Beta(alpha, alpha).
@@ -2137,7 +2309,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
         # 5. Extract posterior mean
         posterior_means = extract_posterior_means(param_history)
 
-        # Plot TF vs reconstructed TF from these posterior means - just plot for last one
+        # Plot TF vs reconstructed TF from these posterior means - just plot for last seed
         if m == M-1:
             plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db, True)
 
@@ -2284,22 +2456,19 @@ if __name__ == '__main__':
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    t0 = time.time()
-    J = jacrev(H_nofault_wrapper_f64)(params_flat)
-    print("One jacfwd time:", time.time() - t0)
-    adad
     #selected_s1 = ['load_1.C_m_leak', 'load_0.C_m_leak', 'load_20.C_m_leak', 'load_9.C_m_leak', 'load_11.C_m_leak',
      #               'load_3.C_m_leak', 'load_15.C_m_leak', 'load_8.C_m_leak', 'load_2.C_leak', 'load_6.C_m_leak']
-    selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
+    selected_s1, sorted_keys_s1, sensitivites = get_hardcoded_prior_averaged_sensitivity(p)
+    # selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params, p)
 #     comparison, warnings = compare_global_local_sensitivity(
 #     cable_lengths, load_params, top_p=10
 # )
 
-    jacobians, csm = compute_jacobian_cosine_similarity(
-        selected_s1, scenario='no_fault'
-    )
+    #jacobians, csm = compute_jacobian_cosine_similarity(
+    #    selected_s1, scenario='no_fault'
+    #)
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
     #snr_dbs = [40]
