@@ -12,6 +12,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import time
 import pyro.distributions as dist
+import shutil
 
 from pyro.distributions.transforms import SigmoidTransform, AffineTransform
 from pyro.distributions import TransformedDistribution, constraints
@@ -34,7 +35,13 @@ OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 # Learning rate for optimizer
 NUM_STEPS = 500 #Num of SVI steps
 NUM_PARTICLES = 12  # Number of particles for SVI
-VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
+VECTORIZE_PARTICLES = True  # Whether to vectorize particles (faster but uses more memory)
+p = 50 #Number of inferred network parameters in Stage 1
+seed = 85 
+M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
+alpha = 5.0 #Hyperparameter of beta prior
+OUTPUT_DIR = f"frequentist_p{p}_M{M}_seed{seed}"
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -922,7 +929,7 @@ def set_network_params_from_normalized(sampled_theta, param_order_list):
             network_params["cable_lengths"][cable_name]["value"] = sampled_theta[counter].item()
             counter = counter + 1    
 
-def perform_global_sensitivity_analysis(cable_lengths_norm, load_params_norm, top_p):
+def perform_global_sensitivity_analysis(cable_lengths_norm, load_params_norm):
     """
     Perform global sensitivity analysis on network parameters.
     
@@ -932,14 +939,12 @@ def perform_global_sensitivity_analysis(cable_lengths_norm, load_params_norm, to
     Args:
         cable_lengths_norm: Dict of {cable_name: normalized_value} for cables with inferred=True
         load_params_norm: Dict of {load_name: {param_name: normalized_value}} for inferred params
-        top_p: Number of top most sensitive parameters to select
 
     Returns:
         selected_keys: List of top p most sensitive params sorted by sensitivity
         sorted_keys: List of all params sorted from most sensitive to least sensitive
         sensitivities: List of sensitivity values (%) corresponding to sorted_keys
     """
-    p = top_p
     variations = {}
 
     # Compute nominal H with current normalized params
@@ -1077,7 +1082,7 @@ def get_inferred_param_order():
 
 def get_true_param_flat():
     """
-    Get flat tensor of true parameter values in the order defined by get_inferred_param_order().
+    Get flat tensor of true inferred parameter values in the order defined by get_inferred_param_order().
 
     Returns:
         params_flat: [P] tensor of true parameter values in physical units
@@ -1128,14 +1133,14 @@ def build_params_from_flat(params_flat, param_order):
 def compute_real_FIM(var_f):
     """
     g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately) \\
-    P = number of parameters (inputs) \\
-    F = number of frequencies (outputs) \\
+    p = number of parameters (inputs) \\
+    f = number of frequencies (outputs) \\
     Compute Real Fisher Information Matrix for normalized theta in [0, 1]
     Args:
         var_f: Noise variance (determined by SNR) [] if white noise (constant)
         or [F] if frequency dependent
     Returns:
-        I2_scaled: FIM [p, p] in param_order_list order
+        I: FIM [p, p] in param_order_list order
     """
     # Use float64 for FIM/CLRB computation (better numerical precision)
     params_flat = get_true_param_flat().double()
@@ -1411,13 +1416,17 @@ def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, is_Bayesian, num_
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
     if is_Bayesian:
-        plt.savefig(f'bayesian_{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf', dpi=300, bbox_inches='tight')
+        filename = f'bayesian_{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf'
     else:
-        plt.savefig(f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf', dpi=300, bbox_inches='tight')
+        filename = f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf'
+
+    if OUTPUT_DIR:
+        filename = os.path.join(OUTPUT_DIR, filename)
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Saved figure to {snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf")
-    return tf_mean, tf_lower, tf_upper
+    print(f"Saved figure to {filename}")
+    #return tf_mean, tf_lower, tf_upper
 
 def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed):
     """
@@ -1430,11 +1439,11 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed):
     Returns:
         mse_dict: {param_name: MSE} in selected keys order
     """
-    param_order_list, p = get_inferred_param_order()
+    param_order_list, _ = get_inferred_param_order()
     squared_errors = {key: [] for key in selected_s1}
     std_f = torch.sqrt(var_f / 2)
 
-    # Compute H_clean from current network_params (which should be set to theta_true)
+    # Compute H_clean from current network_params (which should be set to theta_true in main)
     cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
 
@@ -1623,7 +1632,7 @@ def compute_jacobian_cosine_similarity(param_keys, scenario="no_fault"):
     print_cosine_similarity_matrix(param_keys, cosine_matrix)
     return jacobians, cosine_matrix
 
-def get_hardcoded_prior_averaged_sensitivity(top_p):
+def get_hardcoded_prior_averaged_sensitivity():
     """
     Return hardcoded prior-averaged sensitivity results.
     These were computed with alpha=5.0, M=100, scenario='no_fault'.
@@ -1755,14 +1764,14 @@ def get_hardcoded_prior_averaged_sensitivity(top_p):
 
     sorted_keys = [k for k, _ in sorted_results]
     sensitivities = [v for _, v in sorted_results]
-    selected_keys = sorted_keys[:top_p]
+    selected_keys = sorted_keys[:p]
 
     # Print results
     print("\n--- Prior-Averaged Sensitivity Results (Hardcoded) ---")
     for i, (key, sens) in enumerate(sorted_results):
         print(f"{key}: {sens:.5f}%")
-        if i == top_p - 1:
-            print(f"--- Top {top_p} selected above this line ---")
+        if i == p - 1:
+            print(f"--- Top {p} selected above this line ---")
 
     # Set inferred=False for ALL parameters first
     for cable_name in network_params["cable_lengths"]:
@@ -1791,11 +1800,11 @@ def get_hardcoded_prior_averaged_sensitivity(top_p):
                 network_params["cable_lengths"][param_key]["inferred"] = True
                 enabled_count += 1
 
-    print(f"\nEnabled inference for {enabled_count} parameters (top {top_p})")
+    print(f"\nEnabled inference for {enabled_count} parameters (top {p})")
 
     return selected_keys, sorted_keys, sensitivities
 
-def perform_local_prior_averaged_sensitivity_analysis(top_p, alpha, M, scenario):
+def perform_local_prior_averaged_sensitivity_analysis(alpha, M, scenario):
     """
     Sample M θ_nominal values from the prior Beta(alpha, alpha).
     Compute local sensitivity around each sampled θ.
@@ -1806,7 +1815,6 @@ def perform_local_prior_averaged_sensitivity_analysis(top_p, alpha, M, scenario)
     giving a more robust parameter selection than single-point local sensitivity.
 
     Args:
-        top_p: Number of top most sensitive parameters to select
         alpha: Beta distribution parameter (Beta(alpha, alpha))
         M: Number of Monte Carlo samples from prior
         scenario: "no_fault" or "with_fault"
@@ -1870,7 +1878,7 @@ def perform_local_prior_averaged_sensitivity_analysis(top_p, alpha, M, scenario)
                           reverse=True)
 
     # Select top p
-    selected = sorted_params[:top_p]
+    selected = sorted_params[:p]
 
     # Build sensitivities list in sorted order (as percentages)
     sensitivities = [sensitivity_dict[k] * 100 for k in sorted_params]
@@ -1878,17 +1886,17 @@ def perform_local_prior_averaged_sensitivity_analysis(top_p, alpha, M, scenario)
     # Print results
     print(f"\n--- Prior-Averaged Sensitivity Results ---")
     for idx, k in enumerate(sorted_params):
-        if idx == top_p:
-            print(f"--- Top {top_p} selected above this line ---")
+        if idx == p:
+            print(f"--- Top {p} selected above this line ---")
         print(f"{k}: {sensitivity_dict[k]*100:.5f}%")
 
-    print(f"\nSelected top {top_p} most sensitive parameters: {selected}")
+    print(f"\nSelected top {p} most sensitive parameters: {selected}")
     print(f"Number of selected parameters: {len(selected)}")
 
     # Set inferred=False for parameters NOT in top p
-    if top_p > 0:
+    if p > 0:
         disabled_count = 0
-        for param_key in sorted_params[top_p:]:
+        for param_key in sorted_params[p:]:
             if "." in param_key:
                 parts = param_key.split(".")
                 entity_name = parts[0]
@@ -1905,12 +1913,12 @@ def perform_local_prior_averaged_sensitivity_analysis(top_p, alpha, M, scenario)
                     network_params["fault_parameters"][param_key]["inferred"] = False
                     disabled_count += 1
 
-        print(f"\nDisabled inference for {disabled_count} parameters (not in top {top_p})")
+        print(f"\nDisabled inference for {disabled_count} parameters (not in top {p})")
 
     sorted_keys = sorted_params
     return selected, sorted_keys, sensitivities
 
-def perform_local_sensitivity_analysis(top_p, scenario):
+def perform_local_sensitivity_analysis(scenario):
     """
     Perform LOCAL sensitivity analysis at the specific θ_true point using Jacobians.
     
@@ -1918,7 +1926,6 @@ def perform_local_sensitivity_analysis(top_p, scenario):
     the gradient ∂H/∂θ at the current parameter values.
 
     Args:
-        top_p: Number of top most sensitive parameters to select
         scenario: "no_fault" or "with_fault"
 
     Returns:
@@ -1928,8 +1935,9 @@ def perform_local_sensitivity_analysis(top_p, scenario):
     """
     # Use float64 for FIM/CLRB computation (better numerical precision)
     params_flat = get_true_param_flat().double()
-    param_order, _ = get_inferred_param_order()
-
+    param_order, p_test = get_inferred_param_order()
+    print("p", p)
+    print("p test", p_test)
     # Compute Jacobian dH/dtheta in float64
     J = jacfwd(H_nofault_wrapper_f64)(params_flat)  # [F, 2, P]
     n_freq = J.shape[0]
@@ -1964,7 +1972,7 @@ def perform_local_sensitivity_analysis(top_p, scenario):
                           reverse=True)
     
     # Select top p
-    selected = sorted_params[:top_p]
+    selected = sorted_params[:p]
 
     # Build sensitivities list in sorted order (as percentages)
     sensitivities = [sensitivity_dict[k] * 100 for k in sorted_params]
@@ -1972,17 +1980,17 @@ def perform_local_sensitivity_analysis(top_p, scenario):
     # Print results
     print("\n--- LOCAL Sensitivity Analysis (at θ_true) ---")
     for idx, k in enumerate(sorted_params):
-        if idx == top_p:
-            print(f"--- Top {top_p} selected above this line ---")
+        if idx == p:
+            print(f"--- Top {p} selected above this line ---")
         print(f"{k}: {sensitivity_dict[k]*100:.5f}%")
     
-    print(f"\nSelected top {top_p} most sensitive parameters: {selected}")
+    print(f"\nSelected top {p} most sensitive parameters: {selected}")
     print(f"Number of selected parameters: {len(selected)}")
 
     # Set inferred=False for parameters NOT in top p
-    if top_p > 0:
+    if p > 0:
         disabled_count = 0
-        for param_key in sorted_params[top_p:]:
+        for param_key in sorted_params[p:]:
             if "." in param_key:
                 parts = param_key.split(".")
                 entity_name = parts[0]
@@ -1999,7 +2007,7 @@ def perform_local_sensitivity_analysis(top_p, scenario):
                     network_params["fault_parameters"][param_key]["inferred"] = False
                     disabled_count += 1
         
-        print(f"\nDisabled inference for {disabled_count} parameters (not in top {top_p})")
+        print(f"\nDisabled inference for {disabled_count} parameters (not in top {p})")
     
     sorted_keys = sorted_params
     return selected, sorted_keys, sensitivities
@@ -2045,129 +2053,6 @@ def remove_correlated_parameters(selected_params, cosine_similarity_matrix, thre
     print(f"Kept {p_new}/{p} parameters: {selected_new}")
     # return p, selected_s1
     return p_new, selected_new
-
-def compare_global_local_sensitivity(cable_lengths_norm, load_params_norm, top_p, scenario="no_fault"):
-    """
-    Compare global and local sensitivity side by side.
-    Ordered by global sensitivity, shows local sensitivity for comparison.
-    
-    Helps identify parameters that are:
-    - Globally sensitive but locally insensitive (dangerous!)
-    - Both globally and locally sensitive (safe to infer)
-    
-    Args:
-        cable_lengths_norm: Normalized cable lengths dict
-        load_params_norm: Normalized load params dict
-        top_p: Number of top parameters to highlight
-        scenario: "no_fault" or "with_fault"
-    
-    Returns:
-        comparison_df: Dict with global and local sensitivities
-        warnings: List of parameters with mismatched sensitivities
-    """
-    
-    # Run global sensitivity analysis
-    print("Computing global sensitivity...")
-    selected_global, sorted_global, sens_global = perform_global_sensitivity_analysis(
-        cable_lengths_norm, load_params_norm, top_p=100  # Get all params
-    )
-    
-    # Run local sensitivity analysis  
-    print("Computing local sensitivity...")
-    selected_local, sorted_local, sens_local = perform_local_sensitivity_analysis(
-        top_p=100, scenario=scenario  # Get all params
-    )
-    
-    # Build dicts for easy lookup
-    global_dict = {k: sens_global[i] for i, k in enumerate(sorted_global)}
-    local_dict = {k: sens_local[i] for i, k in enumerate(sorted_local)}
-    
-    # Get global rank and local rank for each param
-    global_rank = {k: i+1 for i, k in enumerate(sorted_global)}
-    local_rank = {k: i+1 for i, k in enumerate(sorted_local)}
-    
-    # Print comparison table
-    print("\n" + "="*90)
-    print("GLOBAL vs LOCAL SENSITIVITY COMPARISON")
-    print("="*90)
-    print(f"{'Param':<25} {'Global %':>10} {'G.Rank':>8} {'Local %':>10} {'L.Rank':>8} {'Δ Rank':>8} {'Status':<10}")
-    print("-"*90)
-    
-    warnings = []
-    
-    for i, param in enumerate(sorted_global):
-        g_sens = global_dict.get(param, 0)
-        l_sens = local_dict.get(param, 0)
-        g_rank = global_rank.get(param, -1)
-        l_rank = local_rank.get(param, -1)
-        delta_rank = l_rank - g_rank  # Positive = worse locally than globally
-        
-        # Determine status
-        if i < top_p:
-            # This param would be selected by global sensitivity
-            if l_rank > top_p:
-                status = "⚠️ DANGER"  # Globally top-p but locally not
-                warnings.append((param, g_rank, l_rank, g_sens, l_sens))
-            elif l_sens < 0.5:  # Less than 0.5% local sensitivity
-                status = "⚠️ LOW"
-                warnings.append((param, g_rank, l_rank, g_sens, l_sens))
-            else:
-                status = "✓ OK"
-        else:
-            status = ""
-        
-        # Highlight top p
-        marker = ">>>" if i < top_p else "   "
-        
-        print(f"{marker} {param:<22} {g_sens:>9.3f}% {g_rank:>7} {l_sens:>9.3f}% {l_rank:>7} {delta_rank:>+7} {status:<10}")
-        
-        if i == top_p - 1:
-            print("-"*90 + " (top {} above)".format(top_p))
-    
-    # Print warnings summary
-    if warnings:
-        print("\n" + "!"*70)
-        print("⚠️  WARNING: These parameters are globally sensitive but locally weak!")
-        print("!"*70)
-        for param, g_rank, l_rank, g_sens, l_sens in warnings:
-            print(f"  {param}: Global rank {g_rank} ({g_sens:.2f}%) → Local rank {l_rank} ({l_sens:.2f}%)")
-        print("\nConsider using LOCAL sensitivity for parameter selection at this θ_true.")
-        print("!"*70)
-    else:
-        print("\n✓ No major discrepancies between global and local sensitivity.")
-    
-    # Print recommended selection
-    print("\n" + "="*70)
-    print("RECOMMENDED TOP {} PARAMETERS:".format(top_p))
-    print("="*70)
-    print(f"{'Method':<15} {'Selected Parameters'}")
-    print("-"*70)
-    print(f"{'Global:':<15} {selected_global[:top_p]}")
-    print(f"{'Local:':<15} {selected_local[:top_p]}")
-    
-    # Find params in global top-p but not local top-p
-    global_set = set(selected_global[:top_p])
-    local_set = set(selected_local[:top_p])
-    only_global = global_set - local_set
-    only_local = local_set - global_set
-    
-    if only_global:
-        print(f"\n⚠️  In global top-{top_p} but NOT local: {only_global}")
-    if only_local:
-        print(f"   In local top-{top_p} but NOT global: {only_local}")
-    
-    print("="*70)
-    
-    # Return data for further analysis
-    comparison = {
-        'params': sorted_global,
-        'global_sens': [global_dict[k] for k in sorted_global],
-        'local_sens': [local_dict.get(k, 0) for k in sorted_global],
-        'global_rank': [global_rank[k] for k in sorted_global],
-        'local_rank': [local_rank.get(k, len(sorted_global)) for k in sorted_global],
-    }
-    
-    return comparison, warnings
 
 
 def beta_prior_fim_closed_form(p, alpha):
@@ -2405,12 +2290,15 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
             filename = f"bayesian_rmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}_p{p}_seed{seed}.pdf"
         else:
             filename = f"rmse_vs_crlb_snr_sweep_M{M}_p{p}_seed{seed}.pdf"
-    
+
+    if OUTPUT_DIR:
+        filename = os.path.join(OUTPUT_DIR, filename)
+
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.show()
     print(f"\nSaved plot to {filename}")
     
-if __name__ == '__main__':  
+if __name__ == '__main__':
     start_time = time.time()
     # Generate load params deterministically
     total_params, load_types = generate_load_parameters_deterministic(num_loads)
@@ -2434,12 +2322,12 @@ if __name__ == '__main__':
     # for cable_name in network_params["cable_lengths"]:
     #     network_params["cable_lengths"][cable_name]["inferred"] = False
 
-    p = 50
-    seed = 85
-    M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
-    M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
-    alpha = 5.0
-    param_order_list, P = get_inferred_param_order() #P = total number of params
+
+    # Create timestamped output folder for all plots
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"\n=== Output folder: {OUTPUT_DIR} ===")
+
+    param_order_list, P = get_inferred_param_order() #P = total number of network params (exluding fault)
     g = torch.Generator()
     g.manual_seed(seed)
     theta_true3 = torch.full([P], 0.25)
@@ -2466,13 +2354,11 @@ if __name__ == '__main__':
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    # selected_s1, sorted_keys_s1, sensitivites = get_hardcoded_prior_averaged_sensitivity(p)
-    # selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
-    selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
-    # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params, p)
-#     comparison, warnings = compare_global_local_sensitivity(
-#     cable_lengths, load_params, top_p=10
-# )
+    # selected_s1, sorted_keys_s1, sensitivities = get_hardcoded_prior_averaged_sensitivity()
+    # selected_s1, sorted_keys_s1, sensitivities = perform_local_prior_averaged_sensitivity_analysis(alpha, 100, "no_fault")
+    selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis("no_fault")
+    # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
+
     
     #jacobians, csm = compute_jacobian_cosine_similarity(
     #    selected_s1, scenario='no_fault'
@@ -2528,3 +2414,9 @@ if __name__ == '__main__':
 
     
     print("My program took", time.time() - start_time, "to run")
+
+    # Zip the output folder
+    zip_filename = f"{OUTPUT_DIR}.zip"
+    shutil.make_archive(OUTPUT_DIR, 'zip', OUTPUT_DIR)
+    print(f"\n=== All outputs saved to: {OUTPUT_DIR}/ ===")
+    print(f"=== Zipped to: {zip_filename} ===")
