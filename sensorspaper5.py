@@ -2,6 +2,7 @@ import os
 import numpy as np
 import random
 import pyro
+import pyro.poutine as poutine
 import torch
 import copy
 import math
@@ -32,6 +33,8 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 # Learning rate for optimizer
 NUM_STEPS = 500 #Num of SVI steps
+NUM_PARTICLES = 12  # Number of particles for SVI
+VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -1229,7 +1232,7 @@ def get_true_norm(key):
     else:
         return network_params["cable_lengths"][key]["value"]
 
-def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_steps):
+def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
     pyro.clear_param_store()
 
@@ -1239,10 +1242,17 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
         optimizer = pyro.optim.Adagrad({"lr": LR})
     else:
         raise ValueError(f"Unknown optimizer: {OPTIMIZER}. Use 'Adam' or 'Adagrad'.")
-    
-    #optimizer = pyro.optim.SGD({"lr": 1e-6})
-    #optimizer = pyro.optim.SGD({"lr": 0.0001, "momentum": 0.9})
-    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=12, vectorize_particles=True))
+
+    # When vectorize_particles=True, Pyro wraps model in a plate that SUMS over particles.
+    # We need to scale by 1/NUM_PARTICLES to convert to an AVERAGE (matching non-vectorized behavior).
+    if VECTORIZE_PARTICLES and NUM_PARTICLES > 1:
+        scaled_model = poutine.scale(model, scale=1.0 / NUM_PARTICLES)
+        scaled_guide = poutine.scale(guide, scale=1.0 / NUM_PARTICLES)
+    else:
+        scaled_model = model
+        scaled_guide = guide
+
+    svi = SVI(scaled_model, scaled_guide, optimizer, loss=Trace_ELBO(num_particles=NUM_PARTICLES, vectorize_particles=VECTORIZE_PARTICLES))
     #svi = SVI(model, guide, optimizer, loss =TraceMeanField_ELBO(num_particles=50, vectorize_particles=True))
     #call guide to initialize params
     guide(H1_noisy, std_f)
@@ -1269,7 +1279,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M, num_
     best_loss = float("inf")
     best_params = None
 
-    for step in range(num_steps):
+    for step in range(NUM_STEPS):
         loss = svi.step(H1_noisy, std_f)
         losses.append(loss)
 
@@ -1409,7 +1419,7 @@ def plot_CI_and_pred_TF(param_history, scenario, seed, snr_db, is_Bayesian, num_
     print(f"Saved figure to {snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf")
     return tf_mean, tf_lower, tf_upper
 
-def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
+def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed):
     """
     Compute Frequentist MSE via Monte Carlo at specific SNR.
     For each trial:
@@ -1438,7 +1448,7 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, num_steps):
 
         # 2. Run SVI inference 
         #auto_guide = AutoMultivariateNormal(model_no_fault)  # Full covariance guide
-        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M, num_steps)
+        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M)
         
         # 3. Extract posterior means for this run
         posterior_means = extract_posterior_means(param_history)
@@ -2233,13 +2243,13 @@ def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
 
     # Compute E[I(θ)]
     E_I = compute_expected_data_fim(p, snr_db, alpha, num_samples)
-    print("E_I shape", E_I.shape)
-    print("E_I", E_I)
+    #print("E_I shape", E_I.shape)
+    #print("E_I", E_I)
     
     # Compute J_π (prior FIM)
     J_pi = beta_prior_fim_closed_form(p, alpha)
-    print("J_pi", J_pi)
-    print("J_pi shape", J_pi.shape)
+    # print("J_pi", J_pi)
+    # print("J_pi shape", J_pi.shape)
     # Bayesian FIM
     J_B = E_I + J_pi
     
@@ -2304,7 +2314,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
         H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
         # 4. Run SVI to get estimate
         pyro.clear_param_store()
-        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M, NUM_STEPS)
+        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M)
 
         # 5. Extract posterior mean
         posterior_means = extract_posterior_means(param_history)
@@ -2424,7 +2434,7 @@ if __name__ == '__main__':
     # for cable_name in network_params["cable_lengths"]:
     #     network_params["cable_lengths"][cable_name]["inferred"] = False
 
-    p = 10
+    p = 50
     seed = 85
     M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
     M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior 
@@ -2471,8 +2481,8 @@ if __name__ == '__main__':
     #)
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    #snr_dbs = [40]
-    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs = [40]
+    # snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
@@ -2489,7 +2499,7 @@ if __name__ == '__main__':
 
         # Standard CRLB + RMSE
         # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed, NUM_STEPS)
+        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
         # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
         # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
@@ -2497,6 +2507,7 @@ if __name__ == '__main__':
         # Bayesian CRLB + BRMSE
         bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
         bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
+        print("My program took", time.time() - start_time, "to run")
         print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
         print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
