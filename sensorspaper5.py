@@ -2481,8 +2481,8 @@ if __name__ == '__main__':
     #)
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    snr_dbs = [40]
-    # snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    # snr_dbs = [40]
+    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
