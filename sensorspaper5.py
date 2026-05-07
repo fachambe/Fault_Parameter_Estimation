@@ -2460,28 +2460,26 @@ if __name__ == '__main__':
         else:  # Load parameter
             theta_true4[i] = 0.25
 
-    set_network_params_from_normalized(theta_true2, param_order_list)
+    set_network_params_from_normalized(theta_true4, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    #selected_s1 = ['load_1.C_m_leak', 'load_0.C_m_leak', 'load_20.C_m_leak', 'load_9.C_m_leak', 'load_11.C_m_leak',
-     #               'load_3.C_m_leak', 'load_15.C_m_leak', 'load_8.C_m_leak', 'load_2.C_leak', 'load_6.C_m_leak']
-    selected_s1, sorted_keys_s1, sensitivites = get_hardcoded_prior_averaged_sensitivity(p)
+    # selected_s1, sorted_keys_s1, sensitivites = get_hardcoded_prior_averaged_sensitivity(p)
     # selected_s1, sorted_keys_s1, sensitivites = perform_local_prior_averaged_sensitivity_analysis(p, alpha, 100, "no_fault")
-    # selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
+    selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis(p, "no_fault")
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params, p)
 #     comparison, warnings = compare_global_local_sensitivity(
 #     cable_lengths, load_params, top_p=10
 # )
-
+    
     #jacobians, csm = compute_jacobian_cosine_similarity(
     #    selected_s1, scenario='no_fault'
     #)
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    # snr_dbs = [40]
+    #snr_dbs = [40]
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
@@ -2498,33 +2496,35 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
         # Standard CRLB + RMSE
-        # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
-        # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
+        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
 
         # Bayesian CRLB + BRMSE
-        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
-        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
-        print("My program took", time.time() - start_time, "to run")
-        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
+        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
+        # print("My program took", time.time() - start_time, "to run")
+        # print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        # print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
        #  Store results for plotting
-        # for key in selected_s1:
-        #     if key in mse and key in crlb_u1u1t_dict:
-        #         rmse_results[key].append(math.sqrt(mse[key]))
-        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        for key in selected_s1:
+            if key in mse and key in crlb_u1u1t_dict:
+                rmse_results[key].append(math.sqrt(mse[key]))
+                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
         
         # Store results for plotting
-        for key in selected_s1:
-            if key in bayesian_mse and key in bcrlb_dict:
-                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        # for key in selected_s1:
+        #     if key in bayesian_mse and key in bcrlb_dict:
+        #         bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+        #         bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
         
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
-                                is_bayesian=True, M=M)
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
+                                is_bayesian=False, M=M)
+    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
+    #                            is_bayesian=True, M=M, alpha=alpha)
 
     
     print("My program took", time.time() - start_time, "to run")
