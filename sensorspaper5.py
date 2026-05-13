@@ -32,16 +32,21 @@ start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.02 # Learning rate for optimizer
+LR = 0.02 #Learning rate for optimizer
 NUM_STEPS = 500 #Num of SVI steps
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True  # Whether to vectorize particles (faster but uses more memory)
 p = 50 #Number of inferred network parameters in Stage 1
-seed = 85 
-M = 50 # Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+seed = 88
+M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 alpha = 5.0 #Hyperparameter of beta prior
-OUTPUT_DIR = f"frequentist_p{p}_M{M}_seed{seed}"
+IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs CRLB
+
+if IS_BAYESIAN:
+    OUTPUT_DIR = f"bayesian_p{p}_M{M}_seed{seed}"
+else:
+    OUTPUT_DIR = f"frequentist_p{p}_M{M}_seed{seed}"
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -168,8 +173,8 @@ network_params = {
         # Normalized position [0, 1], will be scaled to [0, L] in forward model
         "fault_position": {"value": 0.25, "inferred": True, "range": (0.0, 1.0)},
         # Complex fault impedance Z_fault = Z_fault_real + j*Z_fault_imag
-        "Z_fault_real": {"value": 100.0, "inferred": True, "range": (0.0, 4000.0)},
-        "Z_fault_imag": {"value": -50.0, "inferred": True, "range": (-100.0, 100.0)}
+        "Z_fault_real": {"value": 0.025, "inferred": True, "range": (0.0, 4000.0)},
+        "Z_fault_imag": {"value": 0.25, "inferred": True, "range": (-100.0, 100.0)}
     },
     "loads": {}  # Dynamically generated based on load type
 }
@@ -181,11 +186,11 @@ def calculate_cable_parameters(r_w, omega, n):
 
     Parameters:
     - r_w: radius of MTL conductor (scalar)
-    - omega: tensor of angular frequencies (num_freq,)
-    - n: number of conductors - 1
+    - omega: tensor of angular frequencies (F,)
+    - n: number of conductors - 1 (scalar)
 
     Returns:
-    - R, L, C, G tensors (shape: (num_freq, n, n))
+    - R, L, C, G tensors (shape: (F, n, n))
     """
     f = omega / (2 * torch.pi)  # Convert omega to frequency (Hz)
     num_freqs = len(f)
@@ -196,7 +201,7 @@ def calculate_cable_parameters(r_w, omega, n):
     dc = 4 * 1e-4 + 3.02 * r_w
     dc2 = math.sqrt(2.0) * dc  
     tandelta = 1e-6
-    delta = 1 / torch.sqrt(torch.pi * mu_0 * sigma * f)  # Skin depth (tensor of shape (num_freqs,))
+    delta = 1 / torch.sqrt(torch.pi * mu_0 * sigma * f)  # Skin depth
     r = torch.where(
         r_w <= 2 * delta,
         1 / (sigma * torch.pi * r_w**2),  # Case where r_w <= 2*delta
@@ -225,31 +230,31 @@ def get_mtl_matrices(R, L, C, G, n, omega):
     Compute MTL matrices for multiple frequencies using PyTorch.
 
     Parameters:
-    - R, L, C, G: (N, n, n) tensors
-    - omega: (N,) tensor
+    - R, L, C, G: (F, n, n) tensors
+    - omega: (F,) tensor
 
     Returns:
-    - T (N, n, n) - Eigenvectors
-    - Tinv (N, n, n) - Inverse of Eigenvectors
-    - gamma (N, n, n) - Propagation Constants
-    - ZC (N, n, n) - Characteristic Impedance
-    - YC (N, n, n) - Characteristic Admittance
+    - T (F, n, n) - Eigenvectors
+    - Tinv (F, n, n) - Inverse of Eigenvectors
+    - gamma (F, n, n) - Propagation Constants
+    - ZC (F, n, n) - Characteristic Impedance
+    - YC (F, n, n) - Characteristic Admittance
     """
-    N, n, _ = R.shape
+    F, n, _ = R.shape
 
-    # Reshape omega to (N, 1, 1) for broadcasting
+    # Reshape omega to (F, 1, 1) for broadcasting
     omega = omega.view(-1, 1, 1)  
 
     # Compute impedance and admittance matrices
-    Z_T = R + 1j * omega * L  # (N, n, n)
-    Y_T = G + 1j * omega * C  # (N, n, n)
+    Z_T = R + 1j * omega * L  # (F, n, n)
+    Y_T = G + 1j * omega * C  # (F, n, n)
 
     # Compute ZY and YZ matrices
-    ZY = torch.matmul(Z_T, Y_T)  # (N, n, n)
-    YZ = torch.matmul(Y_T, Z_T)  # (N, n, n)
+    ZY = torch.matmul(Z_T, Y_T)  # (F, n, n)
+    YZ = torch.matmul(Y_T, Z_T)  # (F, n, n)
     
     # Compute eigenvalues and eigenvectors of YZ
-    eigvals, eigvecs = torch.linalg.eig(YZ)  # eigvals: (N, n), eigvecs: (N, n, n)
+    eigvals, eigvecs = torch.linalg.eig(YZ)  # eigvals: (F, n), eigvecs: (F, n, n)
 
     # Sort eigenvalues by magnitude to ensure consistent mode ordering across frequencies
     # This prevents "mode switching" where eigenvalue indices swap as frequency changes
@@ -267,24 +272,24 @@ def get_mtl_matrices(R, L, C, G, n, omega):
     # eigvecs = eigvecs_sorted
 
     # Compute gamma as a diagonal matrix with sqrt(eigenvalues)
-    gamma = torch.zeros((N, n, n), dtype=torch.complex64, device=R.device)  # Initialize with zeros
+    gamma = torch.zeros((F, n, n), dtype=torch.complex64, device=R.device)  # Initialize with zeros
     gamma[:, torch.arange(n), torch.arange(n)] = torch.sqrt(eigvals)  # Assign square roots of eigenvalues
 
     # Compute batch-wise inverses
-    inv_YT = torch.linalg.inv(Y_T)  # (N, n, n)
-    inv_eigvecs = torch.linalg.inv(eigvecs)  # (N, n, n)
+    inv_YT = torch.linalg.inv(Y_T)  # (F, n, n)
+    inv_eigvecs = torch.linalg.inv(eigvecs)  # (F, n, n)
 
     # Compute characteristic impedance Zc
-    Zc = inv_YT @ eigvecs @ gamma @ inv_eigvecs  # Batch matrix multiplication (N, n, n)
+    Zc = inv_YT @ eigvecs @ gamma @ inv_eigvecs  # Batch matrix multiplication (F, n, n)
 
     # Compute characteristic admittance Yc
-    Yc = torch.linalg.inv(Zc)  # (N, n, n)
+    Yc = torch.linalg.inv(Zc)  # (F, n, n)
     return eigvecs, inv_eigvecs, gamma, Zc, Yc
 
 def calculate_room_admittance_matrix(Y_loads_room, cable_lengths_room, T_r, Tinv_r, ZC_r, YC_r, gamma_r,
                                      T_s, Tinv_s, ZC_s, YC_s, gamma_s):
     """
-    Y_loads_room: list of 4 admittance matrices (torch.Tensor with shape (N, n, n))
+    Y_loads_room: list of 4 admittance matrices (torch.Tensor with shape (F, n, n))
     cable_lengths_room: list of 5 scalar lengths (floats or tensors)
     """
 
@@ -310,7 +315,7 @@ def calculate_room_admittance_matrix(Y_loads_room, cable_lengths_room, T_r, Tinv
 
 # Function to compute constant impedance admittance matrix (type 1)
 def constant_impedance(R_const, C_leak, omega):
-    # When vectorize_particles=True, R_const and C_leak have shape [P, 1]
+    # When vectorize_particles=True, R_const and C_leak have shape [P,1]
     # omega has shape [F]. Result should be [P, F] or [F] depending on input.
     ZG1 = 1 / (1j * omega * C_leak)
     ZG2 = ZG3 = ZG1
@@ -423,8 +428,8 @@ def generate_load_parameters_deterministic(num_loads):
 def reflection_coefficient(YL, T, T_inv, ZC, YC):
     """
     Implements eq. (12) of Tonello paper.
-    Inputs: all (N, n, n) tensors
-    Returns: rho (N, n, n)
+    Inputs: all (F, n, n) tensors except YL which can be [P, F, n, n]
+    Returns: rho (F, n, n) or [P, F, n, n]
     """
     inv_sum = torch.linalg.inv(YL + YC)
     rho = T_inv @ YC @ inv_sum @ (YL - YC) @ ZC @ T
@@ -434,26 +439,26 @@ def carry_back_load(rhoL, T, YC, Gamma, length):
     """
     Implements eq. (13) of Tonello paper.
     Inputs:
-        - rhoL: (..., F, n, n) - reflection coefficient, may have batch dims (particles)
+        - rhoL: (P, F, n, n) - reflection coefficient, may have batch dims (particles)
         - T, YC, Gamma: (F, n, n) - MTL matrices
-        - length: scalar or tensor with batch dims
-    Returns: Y_R(x) (..., F, n, n)
+        - length: scalar or [P, 1]
+    Returns: Y_R(x) (P, F, n, n)
     """
     # Reshape length for broadcasting with Gamma [F, n, n]
     if isinstance(length, torch.Tensor) and length.dim() > 0:
-        # Add 3 dims for F, n, n: [...] -> [..., 1, 1, 1]
-        length_bc = length.view(*length.shape, 1, 1, 1)
+        # Add 2 dims for F, n, n: [P, 1] -> [P, 1, 1, 1]
+        length_bc = length.view(*length.shape, 1, 1)
     else:
         length_bc = length
 
     # Compute matrix exponentials
-    e_pos = torch.matrix_exp(Gamma * length_bc)       # (..., F, n, n)
-    e_neg = torch.matrix_exp(-Gamma * length_bc)      # (..., F, n, n)
+    e_pos = torch.matrix_exp(Gamma * length_bc)       # (P, F, n, n)
+    e_neg = torch.matrix_exp(-Gamma * length_bc)      # (P, F, n, n)
 
     # Compute numerator and denominator
-    num = e_pos + torch.matmul(e_neg, rhoL)        # (..., F, n, n)
-    den = e_pos - torch.matmul(e_neg, rhoL)        # (..., F, n, n)
-    deninv = torch.linalg.inv(den)                 # (..., F, n, n)
+    num = e_pos + torch.matmul(e_neg, rhoL)        # (P, F, n, n)
+    den = e_pos - torch.matmul(e_neg, rhoL)        # (P, F, n, n)
+    deninv = torch.linalg.inv(den)                 # (P, F, n, n)
 
     # Compute final YR - broadcasting handles batch dims
     YR = T @ num @ deninv @ torch.linalg.inv(T) @ YC
@@ -463,10 +468,10 @@ def h_B(rhoL, ZC, T, T_inv, Gamma, length):
     """
     Implements eq. (14) of Tonello paper.
     Inputs:
-        - rhoL: (..., F, n, n) - reflection coefficient, may have batch dims (particles)
+        - rhoL: (P, F, n, n) - reflection coefficient, may have batch dims (particles)
         - ZC, T, T_inv, Gamma: (F, n, n) - MTL matrices
-        - length: scalar or tensor with batch dims
-    Returns: h_B (..., F, n, n)
+        - length: scalar or tensor with batch dims [P, 1]
+    Returns: h_B (P, F, n, n)
     """
     n = ZC.shape[-1]
     device = ZC.device
@@ -476,7 +481,7 @@ def h_B(rhoL, ZC, T, T_inv, Gamma, length):
 
     # Reshape length for broadcasting with Gamma [F, n, n]
     if isinstance(length, torch.Tensor) and length.dim() > 0:
-        length_bc = length.view(*length.shape, 1, 1, 1)
+        length_bc = length.view(*length.shape, 1, 1)
     else:
         length_bc = length
 
@@ -645,6 +650,8 @@ def calculate_Hnw_nofault(cable_lengths, load_params):
     """
     Takes parameters in [0,1] range, converts to physical inside.
     Autograd then computes gradients w.r.t. normalized params automatically.
+
+    Returns TF of shape [F]. 
     """
     
     # Convert cable lengths from [0,1] to physical
@@ -686,10 +693,10 @@ def calculate_Hnw_nofault(cable_lengths, load_params):
         else:
             raise ValueError(f"Unknown load model in {load}")
         
-        # Compute the Nx3x3 admittance matrix for the given load
-        Y_loads[load] = compute_load_admittance_3d((Z12, Z13, Z23, ZG1, ZG2, ZG3))
+        # Compute the Fx3x3 admittance matrix for the given load
+        Y_loads[load] = compute_load_admittance_3d((Z12, Z13, Z23, ZG1, ZG2, ZG3)) #[P, F, n, n]
     
-    R_s, L_s, C_s, G_s = calculate_cable_parameters(r_w_servicepanel, omega, num_of_conductors-1)
+    R_s, L_s, C_s, G_s = calculate_cable_parameters(r_w_servicepanel, omega, num_of_conductors-1) #[F, n, n]
     R_r, L_r, C_r, G_r = calculate_cable_parameters(r_w_room, omega, num_of_conductors-1)
     T_s, Tinv_s, gamma_s, ZC_s, YC_s = get_mtl_matrices(R_s, L_s, C_s, G_s, num_of_conductors-1, omega) #MTL parameters of wires in service panel
     T_r, Tinv_r, gamma_r, ZC_r, YC_r = get_mtl_matrices(R_r, L_r, C_r, G_r, num_of_conductors-1, omega) #MTL parameters of wires in room
@@ -777,19 +784,178 @@ def calculate_Hnw_nofault(cable_lengths, load_params):
     H_nw = H1[..., 0, 0]
     return H_nw
 
+def calculate_Hnw(cable_lengths, sampled_params, fault_params):
+    """
+    Calculate network Transfer Function Hnw given network parameters.
+    
+    Parameters:
+    - cable_lengths (dict): Dictionary of cable lengths (30 lengths)
+    - sampled_params (dict): Dictionary containing sampled load parameters (22 loads of either type 1, 2, or 3)
+    - fault_params (dict): Dictionary containing the 3 fault parameters, length, ReZF, ImZF
+    Returns:
+    - (1,1)st entry of H_nw (F, n, n) where F = num of frequency points and n = num of conductors - 1
+    """
+    r_w_servicepanel = network_params["conductor_radii"]["r_w_servicepanel"]["value"]
+    r_w_room = network_params["conductor_radii"]["r_w_room"]["value"]
+    # Initialize dictionary to store load admittance matrices calculated from sampled_params
+    Y_loads = {}
+    
+
+    fault_location = fault_params["fault_position"]
+    Z_fault_real = fault_params["Z_fault_real"]
+    Z_fault_imag = fault_params["Z_fault_imag"]
+    #From location + impedance find which cable has the fault 
+    fault_seg_idx, local_fault_pos, _ = get_fault_segment_and_local_position(fault_location, cable_lengths)
+    for load, params in sampled_params.items():
+        # Extract impedance-related parameters from the sampled parameters
+        if 'R_const' in params and 'C_leak' in params:
+            Z12, Z13, Z23, ZG1, ZG2, ZG3 = constant_impedance(params['R_const'], params['C_leak'], omega)
+        elif 'R_s' in params and 'omega_0s' in params:
+            Z12, Z13, Z23, ZG1, ZG2, ZG3 = double_RLC(
+                params['R_s'], params['omega_0s'], params['zeta_s'], 
+                params['R_p'], params['omega_0p'], params['zeta_p'], 
+                params['delta_1'], params['delta_2'], params['C_d_leak'], omega)  
+        elif 'C_m' in params and 'L_m' in params:
+            Z12, Z13, Z23, ZG1, ZG2, ZG3 = motor_load(
+                params['C_m'], params['L_m'], params['R_m1'], 
+                params['R_m2'], params['C_m_leak'], omega)
+
+        else:
+            raise ValueError(f"Unknown load model in {load}")
+        
+        # Compute the Nx3x3 admittance matrix for the given load
+        Y_loads[load] = compute_load_admittance_3d((Z12, Z13, Z23, ZG1, ZG2, ZG3))
+    
+    
+    R_s, L_s, C_s, G_s = calculate_cable_parameters(r_w_servicepanel, omega, num_of_conductors-1)
+    R_r, L_r, C_r, G_r = calculate_cable_parameters(r_w_room, omega, num_of_conductors-1)
+    T_s, Tinv_s, gamma_s, ZC_s, YC_s = get_mtl_matrices(R_s, L_s, C_s, G_s, num_of_conductors-1, omega) #MTL parameters of wires in service panel
+    T_r, Tinv_r, gamma_r, ZC_r, YC_r = get_mtl_matrices(R_r, L_r, C_r, G_r, num_of_conductors-1, omega) #MTL parameters of wires in room
+
+    #node0 (Yrec)
+    # ===== Backbone segment 0: l_w_0 (room wire) =====
+    if fault_seg_idx == 0:
+        Y_reccarried, h1 = carry_back_with_fault(
+            Y_rec, T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+            cable_lengths["l_w_0"], local_fault_pos, Z_fault_real, Z_fault_imag
+        )
+    else:
+        rho1 = reflection_coefficient(Y_rec, T_r, Tinv_r, ZC_r, YC_r)
+        h1 = h_B(rho1, ZC_r, T_r, Tinv_r, gamma_r, cable_lengths[f"l_w_{0}"])
+        Y_reccarried = carry_back_load(rho1, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{0}"])
+
+    #node1 (Y62)
+    Y_node2 = Y_reccarried + Y_loads["load_0"]
+    # ===== Backbone segment 1: l_w_1 (room wire) =====
+    if fault_seg_idx == 1:
+        Y_node2carried, h2 = carry_back_with_fault(
+            Y_node2, T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+            cable_lengths["l_w_1"], local_fault_pos, Z_fault_real, Z_fault_imag
+        )
+    else:
+        rho2 = reflection_coefficient(Y_node2, T_r, Tinv_r, ZC_r, YC_r)
+        h2 = h_B(rho2, ZC_r, T_r, Tinv_r, gamma_r, cable_lengths[f"l_w_{1}"])
+        Y_node2carried = carry_back_load(rho2, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{1}"])
+
+    #node2 Junction box (Y61 || Y63)
+    rho63 = reflection_coefficient(Y_loads["load_1"], T_r, Tinv_r, ZC_r, YC_r)
+    Y_63 = carry_back_load(rho63, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{2}"])
+    Y_61 = Y_63 + Y_loads["load_2"]
+    rho61 = reflection_coefficient(Y_61, T_r, Tinv_r, ZC_r, YC_r)
+    Y_6 = carry_back_load(rho61, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{3}"])
+    Y_node3 = Y_node2carried + Y_6
+    # ===== Backbone segment 2: l_w_4 (service panel wire) =====
+    if fault_seg_idx == 2:
+        Y_node3carried, h3 = carry_back_with_fault(
+            Y_node3, T_s, Tinv_s, ZC_s, YC_s, gamma_s,
+            cable_lengths["l_w_4"], local_fault_pos, Z_fault_real, Z_fault_imag
+        )
+    else:
+        rho3 = reflection_coefficient(Y_node3, T_s, Tinv_s, ZC_s, YC_s)
+        h3 = h_B(rho3, ZC_s, T_s, Tinv_s, gamma_s, cable_lengths[f"l_w_{4}"])
+        Y_node3carried = carry_back_load(rho3, T_s, YC_s, gamma_s, cable_lengths[f"l_w_{4}"])
+
+    #node3 (4 rooms service panel)
+    Y_5 = calculate_room_admittance_matrix(
+    [Y_loads[f"load_{i}"] for i in range(3, 7)],  # load_3 to load_6
+    [cable_lengths[f"l_w_{i}"] for i in range(5, 10)],  # l_w_5 to l_w_9
+    T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+    T_s, Tinv_s, ZC_s, YC_s, gamma_s
+)
+    Y_4 = calculate_room_admittance_matrix(
+    [Y_loads[f"load_{i}"] for i in range(7, 11)],  # load_7 to load_10
+    [cable_lengths[f"l_w_{i}"] for i in range(10, 15)],  # l_w_10 to l_w_14
+    T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+    T_s, Tinv_s, ZC_s, YC_s, gamma_s
+)
+    Y_3 = calculate_room_admittance_matrix(
+    [Y_loads[f"load_{i}"] for i in range(11, 15)],  # load_11 to load_14
+    [cable_lengths[f"l_w_{i}"] for i in range(15, 20)],  # l_w_15 to l_w_19
+    T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+    T_s, Tinv_s, ZC_s, YC_s, gamma_s
+)
+    Y_2 = calculate_room_admittance_matrix(
+    [Y_loads[f"load_{i}"] for i in range(15, 19)],  # load_15 to load_18
+    [cable_lengths[f"l_w_{i}"] for i in range(20, 25)],  # l_w_20 to l_w_24
+    T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+    T_s, Tinv_s, ZC_s, YC_s, gamma_s
+)
+    Y_node4 = Y_node3carried + Y_5 + Y_4 + Y_3 + Y_2
+    # ===== Backbone segment 3: l_w_25 (service panel wire) =====
+    if fault_seg_idx == 3:
+        Y_node4carried, h4 = carry_back_with_fault(
+            Y_node4, T_s, Tinv_s, ZC_s, YC_s, gamma_s,
+            cable_lengths["l_w_25"], local_fault_pos, Z_fault_real, Z_fault_imag)
+    else:
+        rho4 = reflection_coefficient(Y_node4, T_s, Tinv_s, ZC_s, YC_s)
+        h4= h_B(rho4, ZC_s, T_s, Tinv_s, gamma_s, cable_lengths[f"l_w_{25}"])
+        Y_node4carried = carry_back_load(rho4, T_s, YC_s, gamma_s, cable_lengths[f"l_w_{25}"])
+    #node4 (Y12 || Y14)
+    rho14 = reflection_coefficient(Y_loads["load_19"], T_r, Tinv_r, ZC_r, YC_r)
+    Y_14 = carry_back_load(rho14, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{26}"])
+    Y_12 = Y_14 + Y_loads["load_20"]
+    rho12 = reflection_coefficient(Y_12, T_r, Tinv_r, ZC_r, YC_r)
+    Y_1 = carry_back_load(rho12, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{27}"])
+    Y_node5 = Y_node4carried + Y_1
+
+    # ===== Backbone segment 4: l_w_28 (room wire) =====
+    if fault_seg_idx == 4:
+        Y_node5carried, h5 = carry_back_with_fault(
+            Y_node5, T_r, Tinv_r, ZC_r, YC_r, gamma_r,
+            cable_lengths["l_w_28"], local_fault_pos, Z_fault_real, Z_fault_imag)
+    else:
+        rho5 = reflection_coefficient(Y_node5, T_r, Tinv_r, ZC_r, YC_r)
+        h5 = h_B(rho5, ZC_r, T_r, Tinv_r, gamma_r, cable_lengths[f"l_w_{28}"])
+        Y_node5carried = carry_back_load(rho5, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{28}"])
+
+    # node5 Transmitter Y13 connected in parallel
+    rho13 = reflection_coefficient(Y_loads["load_21"], T_r, Tinv_r, ZC_r, YC_r)
+    Y_13 = carry_back_load(rho13, T_r, YC_r, gamma_r, cable_lengths[f"l_w_{29}"])
+    Y_node6 = Y_node5carried + Y_13
+
+    YTalpha = (ZT12*ZT13 + ZTG1*ZT13 + ZTG1*ZT12)/(ZTG1*ZT12*ZT13)
+    YTbeta = (ZTG2*ZT12 + ZTG2*ZT23 + ZT12*ZT23)/(ZTG2*ZT12*ZT23)
+    YTgamma = (ZTG3*ZT13 + ZTG3*ZT23 + ZT13*ZT23)/(ZTG3*ZT13*ZT23)
+
+    H_trans = calculate_Htrans(YTalpha, YTbeta, YTgamma, Y_node6, ZT0, ZT12, ZT12, ZT13, ZT13, ZT23, ZT23)
+    hoverall = h1 @ h2 @ h3 @ h4 @ h5
+    #hoverall = h5 @ h4 @ h3 @ h2 @ h1
+    H1 = hoverall @ H_trans 
+    H_nw = H1[:, 0, 0]
+    return H_nw
 
 def model_no_fault(H1_noisy, std_f):
     """
     Stage 1. Model with no fault
-
-    When vectorize_particles=True, samples have shape [P, ...] where P = num_particles.
+    H1_noisy has shape [N, F, 2]
+    When vectorize_particles=True, samples have shape [P, 1] where P = num_particles.
     The forward model output shape is [P, F] with particles or [F] without.
     """
     N, F, _ = H1_noisy.shape
     # Beta distribution parameters on correct device
     beta_conc = torch.tensor(5.0, device=device)
 
-    # Sample/fix load parameters
+    # Sample/fix load parameters - when vectorize_particles = True sample all particles at once
     load_params = {}
     for load_name, params in network_params["loads"].items():
         load_dict = {}
@@ -811,7 +977,7 @@ def model_no_fault(H1_noisy, std_f):
         else:
             cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
 
-    # calculate_Hnw_nofault returns shape [..., F] where ... are batch dims (particles)
+    # calculate_Hnw_nofault should return [P, F] where P = num of particles or [F] if scalar
     H1_pred_c = calculate_Hnw_nofault(cable_lengths, load_params)
 
     # Handle both vectorized [P, F] and non-vectorized [F] cases
@@ -822,7 +988,7 @@ def model_no_fault(H1_noisy, std_f):
         # Vectorized: [P, F] -> [P, N, F] (insert N before F)
         H1_pred_c = H1_pred_c.unsqueeze(-2).expand(*H1_pred_c.shape[:-1], N, H1_pred_c.shape[-1])
 
-    H1_pred = torch.view_as_real(H1_pred_c)
+    H1_pred = torch.view_as_real(H1_pred_c) #[P, N, F, 2]
 
     with pyro.plate("data", N):
         pyro.sample(
@@ -1077,6 +1243,10 @@ def get_inferred_param_order():
             if network_params["loads"][load_name][param_name]["inferred"]:
                 param_order.append(("load", load_name, param_name))
 
+    for fault_name in network_params["fault_parameters"]:
+        if network_params["fault_parameters"][fault_name]["inferred"]:
+            param_order.append(("fault_param", fault_name, None))
+
     return param_order, len(param_order)
 
 
@@ -1239,6 +1409,7 @@ def get_true_norm(key):
 
 def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M):
     # H1_noisy is (N, F, 2), float NOT COMPLEX
+    # print("H1 noise shape", H1_noisy.shape)
     pyro.clear_param_store()
 
     if OPTIMIZER == "Adam":
@@ -1248,20 +1419,11 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M):
     else:
         raise ValueError(f"Unknown optimizer: {OPTIMIZER}. Use 'Adam' or 'Adagrad'.")
 
-    # When vectorize_particles=True, Pyro wraps model in a plate that SUMS over particles.
-    # We need to scale by 1/NUM_PARTICLES to convert to an AVERAGE (matching non-vectorized behavior).
-    if VECTORIZE_PARTICLES and NUM_PARTICLES > 1:
-        scaled_model = poutine.scale(model, scale=1.0 / NUM_PARTICLES)
-        scaled_guide = poutine.scale(guide, scale=1.0 / NUM_PARTICLES)
-    else:
-        scaled_model = model
-        scaled_guide = guide
-
-    svi = SVI(scaled_model, scaled_guide, optimizer, loss=Trace_ELBO(num_particles=NUM_PARTICLES, vectorize_particles=VECTORIZE_PARTICLES))
+    svi = SVI(model, guide, optimizer, loss=Trace_ELBO(num_particles=NUM_PARTICLES, vectorize_particles=True, max_plate_nesting=1))
     #svi = SVI(model, guide, optimizer, loss =TraceMeanField_ELBO(num_particles=50, vectorize_particles=True))
     #call guide to initialize params
     guide(H1_noisy, std_f)
-
+    
     param_store = pyro.get_param_store()
     print(f"\n===== STEP 0 (INITIALIZATION) =====")
     for key in sorted_keys[:10]:
@@ -1935,9 +2097,7 @@ def perform_local_sensitivity_analysis(scenario):
     """
     # Use float64 for FIM/CLRB computation (better numerical precision)
     params_flat = get_true_param_flat().double()
-    param_order, p_test = get_inferred_param_order()
-    print("p", p)
-    print("p test", p_test)
+    param_order, _ = get_inferred_param_order()
     # Compute Jacobian dH/dtheta in float64
     J = jacfwd(H_nofault_wrapper_f64)(params_flat)  # [F, 2, P]
     n_freq = J.shape[0]
@@ -2297,7 +2457,50 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.show()
     print(f"\nSaved plot to {filename}")
-    
+
+
+def plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, snr_db, save_path):
+    """
+    plot fault_position vs NLL.
+    """
+    print("snr db", snr_db)
+    obs_tf_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    sigpow_s2 = torch.mean(torch.abs(obs_tf_clean)**2)
+    var_f_s2 = sigpow_s2 / snr_lin #scalar
+    std_f_s2 = torch.sqrt(var_f_s2 / 2)
+
+    obs_tf_noisy = obs_tf_clean + std_f_s2 * torch.randn_like(obs_tf_clean.real) + \
+                  1j * std_f_s2 * torch.randn_like(obs_tf_clean.imag)
+
+    # Sweep L1 from 0 to 1 (normalized)
+    L1_normalized = torch.linspace(0.01, 0.99, 199, dtype=torch.float32)
+    losses = []
+    original_fault_position = fault_params["fault_position"]  # Save original value
+    with torch.no_grad():
+        for L1 in L1_normalized:
+            #fault_params["fault_position"] = denormalize(L1, min_val, max_val)
+            fault_params["fault_position"] = L1
+            pred_tf = calculate_Hnw(cable_lengths, load_params, fault_params)
+            diff = obs_tf_noisy - pred_tf
+            nll = (diff.abs().pow(2) / var_f_s2).sum()   # correct
+            losses.append(nll.item())
+    fault_params["fault_position"] = original_fault_position  # Restore original value
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(L1_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+    plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True fault_position=0.25')
+    plt.xlabel('L1 (normalized)', fontsize=12)
+    plt.ylabel('Loss (NLL)', fontsize=12)
+    plt.title('Loss Landscape vs Fault Location L1 (Complex Model)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Saved loss landscape plot to {save_path}")
+
 if __name__ == '__main__':
     start_time = time.time()
     # Generate load params deterministically
@@ -2313,7 +2516,12 @@ if __name__ == '__main__':
     fault_params = {
         key: torch.tensor(val["value"], device=device) for key, val in network_params["fault_parameters"].items()
     }
-
+    # # Turn OFF cable/load inference for stage 2
+    # for cable_name in network_params["cable_lengths"]:
+    #     network_params["cable_lengths"][cable_name]["inferred"] = False
+    # for load_name in network_params["loads"]:
+    #     for param_name in network_params["loads"][load_name]:
+    #         network_params["loads"][load_name][param_name]["inferred"] = False
     # Turn OFF fault parameter inference for stage 1
     for fault_name in network_params["fault_parameters"]:
         network_params["fault_parameters"][fault_name]["inferred"] = False
@@ -2348,15 +2556,15 @@ if __name__ == '__main__':
         else:  # Load parameter
             theta_true4[i] = 0.25
 
-    set_network_params_from_normalized(theta_true4, param_order_list)
+    set_network_params_from_normalized(theta_true2, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params = build_params_from_flat(params_flat, param_order_list)
-    H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+    H_clean = calculate_Hnw_nofault(cable_lengths, load_params) #[F] when all inputs are scalars
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    # selected_s1, sorted_keys_s1, sensitivities = get_hardcoded_prior_averaged_sensitivity()
+    selected_s1, sorted_keys_s1, sensitivities = get_hardcoded_prior_averaged_sensitivity()
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_prior_averaged_sensitivity_analysis(alpha, 100, "no_fault")
-    selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis("no_fault")
+    # selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis("no_fault")
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
 
     
@@ -2382,35 +2590,34 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
         # Standard CRLB + RMSE
-        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
-        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+        # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
+        # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
 
         # Bayesian CRLB + BRMSE
-        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
-        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
-        # print("My program took", time.time() - start_time, "to run")
-        # print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        # print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
        #  Store results for plotting
-        for key in selected_s1:
-            if key in mse and key in crlb_u1u1t_dict:
-                rmse_results[key].append(math.sqrt(mse[key]))
-                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        # for key in selected_s1:
+        #     if key in mse and key in crlb_u1u1t_dict:
+        #         rmse_results[key].append(math.sqrt(mse[key]))
+        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
         
         # Store results for plotting
-        # for key in selected_s1:
-        #     if key in bayesian_mse and key in bcrlb_dict:
-        #         bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-        #         bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        for key in selected_s1:
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
         
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
-                                is_bayesian=False, M=M)
-    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
-    #                            is_bayesian=True, M=M, alpha=alpha)
+    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
+     #                           is_bayesian=False, M=M)
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
+                                is_bayesian=True, M=M, alpha=alpha)
 
     
     print("My program took", time.time() - start_time, "to run")
