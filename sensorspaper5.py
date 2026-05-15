@@ -41,7 +41,7 @@ seed = 88
 M = 25 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 alpha = 5.0 #Hyperparameter of beta prior
-IS_BAYESIAN = False #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
+IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
 SCENARIO = "with_fault" #Forward model contains fault or not (stage 2 vs stage 1 respectively)
 
 if IS_BAYESIAN:
@@ -178,7 +178,7 @@ network_params = {
         # Normalized position [0, 1], will be scaled to [0, L] in forward model
         "fault_position": {"value": 0.25, "inferred": True, "range": (0.0, 1.0)},
         # Complex fault impedance Z_fault = Z_fault_real + j*Z_fault_imag
-        "Z_fault_real": {"value": 0.025, "inferred": True, "range": (0.0, 4000.0)},
+        "Z_fault_real": {"value": 0.1, "inferred": True, "range": (0.0, 1000.0)},
         "Z_fault_imag": {"value": 0.25, "inferred": True, "range": (-100.0, 100.0)}
     },
     "loads": {}  # Dynamically generated based on load type
@@ -1612,7 +1612,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, m, M):
     print("Inference complete.")
     return losses, best_param_history
 
-def plot_CI_and_pred_TF(param_history, seed, snr_db, is_Bayesian, num_samples=200):
+def plot_CI_and_pred_TF(param_history, seed, snr_db, num_samples=200):
     param_order_list, p = get_inferred_param_order()
     params_flat = get_true_param_flat()
     cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
@@ -1697,7 +1697,7 @@ def plot_CI_and_pred_TF(param_history, seed, snr_db, is_Bayesian, num_samples=20
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    if is_Bayesian:
+    if IS_BAYESIAN:
         filename = f'bayesian_{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{SCENARIO}_p{p}.pdf'
     else:
         filename = f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{SCENARIO}_p{p}_seed{seed}.pdf'
@@ -1752,7 +1752,7 @@ def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed):
 
         # Plot TF vs reconstructed TF from these posterior means - just plot for last one
         if m == M-1:
-            plot_CI_and_pred_TF(param_history, seed, snr_db, True)
+            plot_CI_and_pred_TF(param_history, seed, snr_db)
 
         # 4. Compute squared errors vs true theta
         for key in selected_s1:
@@ -2339,7 +2339,7 @@ def remove_correlated_parameters(selected_params, cosine_similarity_matrix, thre
     return p_new, selected_new
 
 
-def beta_prior_fim_closed_form(p, alpha):
+def beta_prior_fim_closed_form(alpha):
     """Closed form prior FIM for Beta(α,α) priors."""
     if alpha <= 2:
         raise ValueError("alpha must be > 2 for finite FIM")
@@ -2348,10 +2348,10 @@ def beta_prior_fim_closed_form(p, alpha):
     J_pi = j_pi_scalar * torch.eye(p)  # Diagonal
     return J_pi
 
-def compute_expected_data_fim(p, snr_db, alpha, num_samples=100):
+def compute_expected_data_fim(snr_db, alpha, num_samples=100):
     """
     Compute E_π[I(θ)] via Monte Carlo.
-    
+
     Returns:
         E_I: Expected data FIM [p, p]
     """
@@ -2359,7 +2359,7 @@ def compute_expected_data_fim(p, snr_db, alpha, num_samples=100):
 
     # Sample parameter values from prior
     beta_dist = torch.distributions.Beta(alpha, alpha)
-    theta_samples = beta_dist.sample((num_samples, p))  # [num_samples, p]    
+    theta_samples = beta_dist.sample((num_samples, p))  # [num_samples, p]
     # Accumulate FIMs
     E_I = torch.zeros(p, p)
     param_order_list, _ = get_inferred_param_order()
@@ -2368,41 +2368,46 @@ def compute_expected_data_fim(p, snr_db, alpha, num_samples=100):
         set_network_params_from_normalized(theta_samples[m], param_order_list)
 
         # Compute H_clean for this theta
-        cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
-        H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
-        
+        cable_lengths, load_params, fault_params = build_params_from_flat(get_true_param_flat(), param_order_list)
+        if SCENARIO == "with_fault":
+            H_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+        else:
+            H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+
         # Compute var_f for this theta
         sigpow = torch.mean(torch.abs(H_clean)**2)
         var_f = sigpow / snr_lin
 
         # Compute FIM at this theta
-        I_phi = compute_real_FIM(var_f) 
-        
+        I_phi = compute_real_FIM(var_f)
+
         E_I += I_phi
-    
+
     E_I /= num_samples
     return E_I
 
 # Convert selected_s1 keys to param_order_list tuple format
 def key_to_tuple(key):
-    """Convert 'l_w_4' or 'load_1.C_m_leak' to tuple format."""
+    """Convert 'l_w_4', 'load_1.C_m_leak', or 'fault_position' to tuple format."""
     if '.' in key:
         # Load parameter: 'load_1.C_m_leak' → ('load', 'load_1', 'C_m_leak')
         parts = key.split('.')
         return ('load', parts[0], parts[1])
+    elif key in network_params.get("fault_parameters", {}):
+        # Fault parameter: 'fault_position' → ('fault_param', 'fault_position', None)
+        return ('fault_param', key, None)
     else:
         # Cable parameter: 'l_w_4' → ('cable', 'l_w_4', None)
         return ('cable', key, None)
     
 
-def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
+def compute_real_BCRLB(snr_db, selected_keys, alpha, num_samples=100):
     """
     Compute Bayesian CRLB.
     
     Args:
         snr_db: SNR in dB
         selected_keys: List of parameter keys to extract (in desired order)
-        p: Number of inferred parameters
         alpha: Beta prior parameter
         num_samples: Number of MC samples for E[I(θ)]
     
@@ -2411,12 +2416,12 @@ def compute_real_BCRLB(snr_db, selected_keys, p, alpha, num_samples=100):
     """
 
     # Compute E[I(θ)]
-    E_I = compute_expected_data_fim(p, snr_db, alpha, num_samples)
+    E_I = compute_expected_data_fim(snr_db, alpha, num_samples)
     #print("E_I shape", E_I.shape)
     #print("E_I", E_I)
     
     # Compute J_π (prior FIM)
-    J_pi = beta_prior_fim_closed_form(p, alpha)
+    J_pi = beta_prior_fim_closed_form(alpha)
     # print("J_pi", J_pi)
     # print("J_pi shape", J_pi.shape)
     # Bayesian FIM
@@ -2455,16 +2460,16 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
     # Set seeds for reproducibility
-    torch.manual_seed(seed)
-    pyro.set_rng_seed(seed)
+    #torch.manual_seed(seed)
+    #pyro.set_rng_seed(seed)
 
-    param_order_list, p = get_inferred_param_order()
+    param_order_list, _ = get_inferred_param_order()
     squared_errors = {key: [] for key in selected_s1}
     snr_lin = 10.0 ** (snr_db / 10.0)
 
     for m in range(M):
         print(f"Trial {m+1}/{M}")
-        
+
         # 1. Sample true theta from prior
         beta_dist = torch.distributions.Beta(alpha, alpha)
         theta_true_normalized = beta_dist.sample((p,))
@@ -2473,24 +2478,31 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
         set_network_params_from_normalized(theta_true_normalized, param_order_list)
 
         # 3. Generate clean signal from this theta
-        cable_lengths, load_params = build_params_from_flat(get_true_param_flat(), param_order_list)
-        H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+        cable_lengths, load_params, fault_params = build_params_from_flat(get_true_param_flat(), param_order_list)
+        if SCENARIO == "with_fault":
+            H_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+        else:
+            H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
         sigpow = torch.mean(torch.abs(H_clean)**2)
         var_f = sigpow / snr_lin
         std_f = torch.sqrt(var_f / 2)
         H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
                      1j * std_f * torch.randn_like(H_clean.imag)
         H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
+
         # 4. Run SVI to get estimate
         pyro.clear_param_store()
-        losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M)
+        if SCENARIO == "with_fault":
+            losses, param_history = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, m, M)
+        else:
+            losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M)
 
         # 5. Extract posterior mean
         posterior_means = extract_posterior_means(param_history)
 
         # Plot TF vs reconstructed TF from these posterior means - just plot for last seed
         if m == M-1:
-            plot_CI_and_pred_TF(param_history, "no_fault", seed, snr_db, True)
+            plot_CI_and_pred_TF(param_history, seed, snr_db)
 
         # 6. Compute squared errors vs sampled true θ
         for key in selected_s1:
@@ -2576,11 +2588,15 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     print(f"\nSaved plot to {filename}")
 
 
-def plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, snr_db, save_path):
+def plot_nll_vs_L1_complex_mtl(snr_db):
     """
     plot fault_position vs NLL.
     """
     print("snr db", snr_db)
+
+    param_order_list, _ = get_inferred_param_order() #P = total number of network params (exluding fault)
+    params_flat = get_true_param_flat()
+    cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
     obs_tf_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
     snr_lin = 10.0 ** (snr_db / 10.0)
     sigpow_s2 = torch.mean(torch.abs(obs_tf_clean)**2)
@@ -2594,6 +2610,8 @@ def plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, snr_db,
     L1_normalized = torch.linspace(0.01, 0.99, 199, dtype=torch.float32)
     losses = []
     original_fault_position = fault_params["fault_position"]  # Save original value
+    true_L1 = network_params["fault_parameters"]["fault_position"]["value"]
+
     with torch.no_grad():
         for L1 in L1_normalized:
             #fault_params["fault_position"] = denormalize(L1, min_val, max_val)
@@ -2607,16 +2625,105 @@ def plot_nll_vs_L1_complex_mtl(cable_lengths, load_params, fault_params, snr_db,
     # Plot
     plt.figure(figsize=(10, 6))
     plt.plot(L1_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
-    plt.axvline(x=0.25, color='r', linestyle='--', linewidth=2, label='True fault_position=0.25')
+    plt.axvline(x=true_L1, color='r', linestyle='--', linewidth=2, label=f'True L1={true_L1:.2f}')
     plt.xlabel('L1 (normalized)', fontsize=12)
     plt.ylabel('Loss (NLL)', fontsize=12)
     plt.title('Loss Landscape vs Fault Location L1 (Complex Model)', fontsize=14)
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.savefig("nll_vs_L1_complex", dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"Saved loss landscape plot to {save_path}")
+
+def plot_nll_vs_ZFre_complex_mtl(snr_db):
+    """
+    Plot Z_fault_real (real part of fault impedance) vs NLL.
+    """
+    print("snr db", snr_db)
+
+    param_order_list, _ = get_inferred_param_order()
+    params_flat = get_true_param_flat()
+    cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
+    obs_tf_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    sigpow_s2 = torch.mean(torch.abs(obs_tf_clean)**2)
+    var_f_s2 = sigpow_s2 / snr_lin
+    std_f_s2 = torch.sqrt(var_f_s2 / 2)
+
+    obs_tf_noisy = obs_tf_clean + std_f_s2 * torch.randn_like(obs_tf_clean.real) + \
+                  1j * std_f_s2 * torch.randn_like(obs_tf_clean.imag)
+
+    # Sweep Z_fault_real from 0 to 1 (normalized)
+    ZFre_normalized = torch.linspace(0.01, 0.99, 199, dtype=torch.float32)
+    losses = []
+    original_ZFre = fault_params["Z_fault_real"]  # Save original value
+    true_ZFre = network_params["fault_parameters"]["Z_fault_real"]["value"]
+    with torch.no_grad():
+        for ZFre in ZFre_normalized:
+            fault_params["Z_fault_real"] = ZFre
+            pred_tf = calculate_Hnw(cable_lengths, load_params, fault_params)
+            diff = obs_tf_noisy - pred_tf
+            nll = (diff.abs().pow(2) / var_f_s2).sum()
+            losses.append(nll.item())
+    fault_params["Z_fault_real"] = original_ZFre  # Restore original value
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(ZFre_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+    plt.axvline(x=true_ZFre, color='r', linestyle='--', linewidth=2, label=f'True Z_fault_real={true_ZFre:.2f}')
+    plt.xlabel('Z_fault_real (normalized)', fontsize=12)
+    plt.ylabel('Loss (NLL)', fontsize=12)
+    plt.title('Loss Landscape vs Z_fault_real (Complex Model)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("nll_vs_ZFre_complex", dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_nll_vs_ZFim_complex_mtl(snr_db):
+    """
+    Plot Z_fault_imag (imaginary part of fault impedance) vs NLL.
+    """
+    print("snr db", snr_db)
+
+    param_order_list, _ = get_inferred_param_order()
+    params_flat = get_true_param_flat()
+    cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
+    obs_tf_clean = calculate_Hnw(cable_lengths, load_params, fault_params)
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    sigpow_s2 = torch.mean(torch.abs(obs_tf_clean)**2)
+    var_f_s2 = sigpow_s2 / snr_lin
+    std_f_s2 = torch.sqrt(var_f_s2 / 2)
+
+    obs_tf_noisy = obs_tf_clean + std_f_s2 * torch.randn_like(obs_tf_clean.real) + \
+                  1j * std_f_s2 * torch.randn_like(obs_tf_clean.imag)
+
+    # Sweep Z_fault_imag from 0 to 1 (normalized)
+    ZFim_normalized = torch.linspace(0.01, 0.99, 199, dtype=torch.float32)
+    losses = []
+    original_ZFim = fault_params["Z_fault_imag"]  # Save original value
+    true_ZFim = network_params["fault_parameters"]["Z_fault_imag"]["value"]
+    with torch.no_grad():
+        for ZFim in ZFim_normalized:
+            fault_params["Z_fault_imag"] = ZFim
+            pred_tf = calculate_Hnw(cable_lengths, load_params, fault_params)
+            diff = obs_tf_noisy - pred_tf
+            nll = (diff.abs().pow(2) / var_f_s2).sum()
+            losses.append(nll.item())
+    fault_params["Z_fault_imag"] = original_ZFim  # Restore original value
+
+    # Plot
+    plt.figure(figsize=(10, 6))
+    plt.plot(ZFim_normalized.cpu().numpy(), losses, 'b-', linewidth=2)
+    plt.axvline(x=true_ZFim, color='r', linestyle='--', linewidth=2, label=f'True Z_fault_imag={true_ZFim:.2f}')
+    plt.xlabel('Z_fault_imag (normalized)', fontsize=12)
+    plt.ylabel('Loss (NLL)', fontsize=12)
+    plt.title('Loss Landscape vs Z_fault_imag (Complex Model)', fontsize=14)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("nll_vs_ZFim_complex", dpi=300, bbox_inches='tight')
+    plt.close()
 
 if __name__ == '__main__':
     start_time = time.time()
@@ -2655,7 +2762,7 @@ if __name__ == '__main__':
     theta_true2 = torch.zeros(P)
     for i in range(P):
         # Beta uses gamma internally, which respects torch's RNG
-        torch.manual_seed(seed + i)  # Different seed per param but reproducible
+        # torch.manual_seed(seed + i)  # Different seed per param but reproducible
         theta_true2[i] = beta_dist.sample()
 
     theta_true4 = torch.zeros(P)
@@ -2665,7 +2772,6 @@ if __name__ == '__main__':
             theta_true4[i] = beta_dist.sample()
         else:  # Load parameter
             theta_true4[i] = 0.25
-
     #set_network_params_from_normalized(theta_true2, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
@@ -2679,6 +2785,10 @@ if __name__ == '__main__':
     selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis()
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
     #selected_s1 = []
+    
+    #plot_nll_vs_L1_complex_mtl(40.0)
+    #plot_nll_vs_ZFre_complex_mtl(40.0)
+    #plot_nll_vs_ZFim_complex_mtl(40.0)
     
     #jacobians, csm = compute_jacobian_cosine_similarity(
     #    selected_s1, scenario='no_fault'
@@ -2702,34 +2812,34 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
         # Standard CRLB + RMSE
-        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
-        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+        # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
+        # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
 
         # Bayesian CRLB + BRMSE
-        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, p, alpha, M2)
-        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
-        # print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        # print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, M2)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
        #  Store results for plotting
-        for key in selected_s1:
-            if key in mse and key in crlb_u1u1t_dict:
-                rmse_results[key].append(math.sqrt(mse[key]))
-                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        # for key in selected_s1:
+        #     if key in mse and key in crlb_u1u1t_dict:
+        #         rmse_results[key].append(math.sqrt(mse[key]))
+        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
         
         # Store results for plotting
-        # for key in selected_s1:
-        #     if key in bayesian_mse and key in bcrlb_dict:
-        #         bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-        #         bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        for key in selected_s1:
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
         
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
-                               is_bayesian=False, M=M)
-    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
-    #                            is_bayesian=True, M=M, alpha=alpha)
+    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
+    #                           is_bayesian=False, M=M)
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
+                               is_bayesian=True, M=M, alpha=alpha)
 
     
     print("My program took", time.time() - start_time, "to run")
