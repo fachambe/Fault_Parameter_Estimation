@@ -37,7 +37,7 @@ seed = 95
 M = 25 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 alpha = 3.0 #Hyperparameter of beta prior
-IS_BAYESIAN = False #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
+IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
 SCENARIO = "with_fault" #Forward model contains fault or not (stage 2 vs stage 1 respectively)
 
 if IS_BAYESIAN:
@@ -2308,8 +2308,8 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
     # Set seeds for reproducibility
-    #torch.manual_seed(seed)
-    #pyro.set_rng_seed(seed)
+    torch.manual_seed(seed)
+    pyro.set_rng_seed(seed)
 
     param_order_list, _ = get_inferred_param_order()
     squared_errors = {key: [] for key in selected_s1}
@@ -2668,33 +2668,33 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
         # Standard CRLB + RMSE
-        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
-        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
+        # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
+        # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
         # Bayesian CRLB + BRMSE
-        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, M2)
-        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
-        # print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        # print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, M2)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
        #  Store results for plotting
-        for key in selected_s1:
-            if key in mse and key in crlb_u1u1t_dict:
-                rmse_results[key].append(math.sqrt(mse[key]))
-                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        # for key in selected_s1:
+        #     if key in mse and key in crlb_u1u1t_dict:
+        #         rmse_results[key].append(math.sqrt(mse[key]))
+        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
         
         # Store results for plotting
-        # for key in selected_s1:
-        #     if key in bayesian_mse and key in bcrlb_dict:
-        #         bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-        #         bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        for key in selected_s1:
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
         
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
-                               is_bayesian=False, M=M)
-    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
-    #                           is_bayesian=True, M=M, alpha=alpha)
+    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
+    #                           is_bayesian=False, M=M)
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
+                              is_bayesian=True, M=M, alpha=alpha)
 
     
     print("My program took", time.time() - start_time, "to run")
