@@ -6,6 +6,7 @@ import pyro.poutine as poutine
 import torch
 import copy
 import math
+import json
 import pandas as pd
 import matplotlib
 #matplotlib.use("Agg")
@@ -18,14 +19,9 @@ from pyro.distributions.transforms import SigmoidTransform, AffineTransform
 from pyro.distributions import TransformedDistribution, constraints
 from torch.distributions import constraints
 from pyro.distributions.torch_distribution import TorchDistribution
-from pyro.infer.autoguide import AutoMultivariateNormal, AutoGuideList, AutoNormal
 from scipy.linalg import expm
 from torch.func import jacfwd
-from pyro.optim import PyroLRScheduler
-from pyro.infer import TraceMeanField_ELBO
-
 from pyro.infer import SVI, Trace_ELBO
-from collections import defaultdict
 
 
 start_time = time.time()
@@ -36,12 +32,12 @@ LR = 0.02 #Learning rate for optimizer
 NUM_STEPS = 500 #Num of SVI steps
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = False  # Whether to vectorize particles (faster but uses more memory)
-p = 3 #Number of inferred network parameters in Stage 1
-seed = 88
+p = 3 #Number of inferred network parameters in Stage 1. For stage 2 just set to 3 since always inferring the 3 fault parameters. 
+seed = 95
 M = 25 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
-alpha = 5.0 #Hyperparameter of beta prior
-IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
+alpha = 3.0 #Hyperparameter of beta prior
+IS_BAYESIAN = False #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
 SCENARIO = "with_fault" #Forward model contains fault or not (stage 2 vs stage 1 respectively)
 
 if IS_BAYESIAN:
@@ -164,6 +160,7 @@ Z_rec = Z_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
 Y_rec = Y_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
 
 BACKBONE_KEYS = ["l_w_0", "l_w_1", "l_w_4", "l_w_25", "l_w_28"]
+
 # ---- Define Network Parameter Dictionary ----
 network_params = {
     "cable_lengths": {  # 30 parameters, set all to 0.25
@@ -294,8 +291,14 @@ def get_mtl_matrices(R, L, C, G, n, omega):
 def calculate_room_admittance_matrix(Y_loads_room, cable_lengths_room, T_r, Tinv_r, ZC_r, YC_r, gamma_r,
                                      T_s, Tinv_s, ZC_s, YC_s, gamma_s):
     """
-    Y_loads_room: list of 4 admittance matrices (torch.Tensor with shape [P,F,n,n] or [F, n, n])
-    cable_lengths_room: list of 5 cable lengths (torch.tensor with shape [P,1] or [] scalar)
+    Returns equivalent admittance matrix of a room in the network. 
+    
+    Args:
+        Y_loads_room: list of 4 admittance matrices (torch.Tensor with shape [P,F,n,n] or [F,n,n])
+        cable_lengths_room: list of 5 cable lengths (torch.tensor with shape [P,1] or [] scalar)
+
+    Returns:
+        Y_room_carried: Equiv. room admittance matrix (torch.tensor with shape [P,F,n,n] or [F,n,n])
     """
 
     # First branch (load_0 -> load_1)
@@ -351,12 +354,13 @@ def compute_load_admittance_3d(load_params):
     """
     Compute 3x3 load admittance matrix from (Z12, Z13, Z23, ZG1, ZG2, ZG3)
 
-    Parameters:
-    - load_params (tuple of tensors): (Z12, Z13, Z23, ZG1, ZG2, ZG3)
-      Each impedance tensor has shape (..., F) where ... are batch dims (e.g., particles).
-      Note: Different tensors may have different batch dims if only some params are sampled.
+    Args:
+        load_params (tuple of tensors): (Z12, Z13, Z23, ZG1, ZG2, ZG3)
+        Each impedance tensor can have shape (..., F) where ... are batch dims (e.g., particles).
+        Note: Different tensors may have different batch dims if only some params are sampled.
+
     Returns:
-    - Y_load (torch.Tensor): Load admittance matrix with shape (..., F, 3, 3)
+        Y_load (torch.Tensor): Load admittance matrix with shape (..., F, 3, 3)
     """
     Z12, Z13, Z23, ZG1, ZG2, ZG3 = load_params  # Unpack impedance values
 
@@ -441,13 +445,15 @@ def reflection_coefficient(YL, T, T_inv, ZC, YC):
     return rho
 
 def carry_back_load(rhoL, T, YC, Gamma, length):
-    """
-    Implements eq. (13) of Tonello paper.
-    Inputs:
-        - rhoL: (P, F, n, n) - reflection coefficient, may have batch dims (particles)
-        - T, YC, Gamma: (F, n, n) - MTL matrices
-        - length: scalar or [P, 1]
-    Returns: Y_R(x) (P, F, n, n)
+    """Implements eq. (13) of Tonello paper.
+
+    Args:
+        rhoL: Reflection coefficient. Shape: (P, F, n, n), may have batch dims (particles).
+        T, YC, Gamma: MTL matrices. Shape: (F, n, n).
+        length: Cable length. Scalar or shape [P, 1].
+
+    Returns:
+        Y_R(x) with shape (P, F, n, n).
     """
     # Reshape length for broadcasting with Gamma [F, n, n]
     if isinstance(length, torch.Tensor) and length.dim() > 0:
@@ -472,11 +478,14 @@ def carry_back_load(rhoL, T, YC, Gamma, length):
 def h_B(rhoL, ZC, T, T_inv, Gamma, length):
     """
     Implements eq. (14) of Tonello paper.
-    Inputs:
-        - rhoL: (P, F, n, n) - reflection coefficient, may have batch dims (particles)
-        - ZC, T, T_inv, Gamma: (F, n, n) - MTL matrices
-        - length: scalar or tensor with batch dims [P, 1]
-    Returns: h_B (P, F, n, n)
+
+    Args:
+        rhoL: (P, F, n, n) - reflection coefficient, may have batch dims (particles)
+        ZC, T, T_inv, Gamma: (F, n, n) - MTL matrices
+        length: scalar or tensor with batch dims [P, 1]
+
+    Returns:
+        h_B (P, F, n, n)
     """
     n = ZC.shape[-1]
     device = ZC.device
@@ -640,7 +649,7 @@ def carry_back_with_fault(Y_load, T, Tinv, ZC, YC, gamma, cable_length,
     At the fault node, Y_fault is added in parallel (shunt to ground).
 
     Parameters:
-    - Y_load: (N, n, n) admittance at the load end (Rx side)
+    - Y_load: (F, n, n) admittance at the load end (Rx side)
     - T, Tinv, ZC, YC, gamma: MTL parameters
     - cable_length: total length of this segment
     - local_fault_pos: distance from load end to fault (meters)
@@ -648,8 +657,8 @@ def carry_back_with_fault(Y_load, T, Tinv, ZC, YC, gamma, cable_length,
     - Z_fault_imag: imaginary part of fault impedance (Ohms)
 
     Returns:
-    - Y_carried: (N, n, n) admittance seen from source end (Tx side)
-    - h_total: (N, n, n) transfer function h_B through the faulted cable
+    - Y_carried: (F, n, n) admittance seen from source end (Tx side)
+    - h_total: (F, n, n) transfer function h_B through the faulted cable
     """
     n = Y_load.shape[1]
     N = Y_load.shape[0]
@@ -1704,10 +1713,20 @@ def plot_CI_and_pred_TF(param_history, seed, snr_db, num_samples=200):
 
     if OUTPUT_DIR:
         filename = os.path.join(OUTPUT_DIR, filename)
+
+    # Save plot data
+    plot_data = {
+        'tf_mean': tf_mean,
+        'tf_lower': tf_lower,
+        'tf_upper': tf_upper,
+        'H_clean_db': H_clean_db.detach().cpu().numpy(),
+        'freq_range_mhz': freq_range_mhz.cpu().numpy(),
+    }
+    np.savez(filename.replace('.pdf', '.npz'), **plot_data)
     plt.savefig(filename, dpi=300, bbox_inches='tight')
     plt.close()
 
-    print(f"Saved figure to {filename}")
+    print(f"Saved: {filename}, {filename.replace('.pdf', '.npz')}, {filename.replace('.pdf', '.json')}")
     #return tf_mean, tf_lower, tf_upper
 
 def calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed):
@@ -1913,177 +1932,6 @@ def compute_jacobian_cosine_similarity(param_keys, scenario="no_fault"):
     print_cosine_similarity_matrix(param_keys, cosine_matrix)
     return jacobians, cosine_matrix
 
-def get_hardcoded_prior_averaged_sensitivity():
-    """
-    Return hardcoded prior-averaged sensitivity results.
-    These were computed with alpha=5.0, M=100, scenario='no_fault'.
-    """
-    # Full sorted results from prior-averaged sensitivity analysis
-    sorted_results = [
-        ('load_1.C_m_leak', 8.68658),
-        ('load_0.C_m_leak', 6.97147),
-        ('load_20.C_m_leak', 6.37758),
-        ('load_9.C_m_leak', 4.85971),
-        ('load_11.C_m_leak', 4.04881),
-        ('load_3.C_m_leak', 3.95357),
-        ('load_15.C_m_leak', 3.78257),
-        ('load_8.C_m_leak', 3.60297),
-        ('load_2.C_leak', 2.68051),
-        ('load_18.C_m_leak', 2.39607),
-        ('load_6.C_m_leak', 2.35984),
-        ('l_w_4', 2.18886),
-        ('l_w_1', 1.80019),
-        ('l_w_3', 1.74691),
-        ('load_1.C_m', 1.70522),
-        ('load_10.C_d_leak', 1.68185),
-        ('load_0.C_m', 1.52587),
-        ('load_4.C_d_leak', 1.52200),
-        ('load_16.C_d_leak', 1.39585),
-        ('l_w_25', 1.30044),
-        ('load_20.C_m', 1.25266),
-        ('l_w_27', 1.23077),
-        ('l_w_14', 1.21051),
-        ('load_2.R_const', 1.16353),
-        ('load_9.C_m', 1.13214),
-        ('load_13.C_leak', 1.12420),
-        ('l_w_9', 1.06501),
-        ('l_w_24', 1.05355),
-        ('load_14.C_leak', 1.02598),
-        ('load_21.C_leak', 1.02183),
-        ('l_w_28', 1.01057),
-        ('load_19.R_const', 0.97778),
-        ('load_19.C_leak', 0.96750),
-        ('load_12.C_leak', 0.86017),
-        ('load_8.C_m', 0.85428),
-        ('load_21.R_const', 0.85392),
-        ('load_3.C_m', 0.81064),
-        ('l_w_13', 0.79678),
-        ('l_w_11', 0.78732),
-        ('load_11.C_m', 0.78437),
-        ('l_w_19', 0.77782),
-        ('load_15.C_m', 0.77629),
-        ('l_w_6', 0.74965),
-        ('l_w_2', 0.73790),
-        ('l_w_21', 0.73499),
-        ('load_5.R_const', 0.71535),
-        ('load_17.R_const', 0.70384),
-        ('l_w_8', 0.69577),
-        ('l_w_23', 0.69296),
-        ('load_7.C_d_leak', 0.60021),
-        ('l_w_16', 0.57027),
-        ('l_w_18', 0.52377),
-        ('load_12.R_const', 0.50467),
-        ('l_w_0', 0.49631),
-        ('load_18.C_m', 0.48228),
-        ('load_6.C_m', 0.47494),
-        ('load_14.R_const', 0.43258),
-        ('l_w_12', 0.39367),
-        ('load_13.R_const', 0.36915),
-        ('load_5.C_leak', 0.35087),
-        ('load_17.C_leak', 0.34059),
-        ('l_w_5', 0.31935),
-        ('l_w_20', 0.29543),
-        ('l_w_15', 0.25940),
-        ('load_1.R_m1', 0.21191),
-        ('l_w_29', 0.18230),
-        ('load_0.R_m1', 0.14106),
-        ('load_9.R_m1', 0.12964),
-        ('load_15.R_m1', 0.11319),
-        ('load_3.R_m1', 0.11155),
-        ('l_w_17', 0.10954),
-        ('load_20.R_m1', 0.10464),
-        ('load_11.R_m1', 0.10218),
-        ('load_8.R_m1', 0.09050),
-        ('l_w_10', 0.08325),
-        ('load_10.omega_0s', 0.07585),
-        ('load_6.R_m1', 0.07472),
-        ('load_16.omega_0s', 0.07380),
-        ('load_4.omega_0s', 0.06890),
-        ('l_w_26', 0.05932),
-        ('load_1.L_m', 0.05340),
-        ('load_9.L_m', 0.04222),
-        ('load_0.L_m', 0.04117),
-        ('load_3.L_m', 0.04005),
-        ('load_15.L_m', 0.03579),
-        ('load_4.R_s', 0.03427),
-        ('load_10.R_s', 0.03305),
-        ('load_11.L_m', 0.03227),
-        ('load_16.R_s', 0.03207),
-        ('load_8.L_m', 0.03039),
-        ('load_18.L_m', 0.02921),
-        ('load_7.omega_0s', 0.02912),
-        ('load_6.L_m', 0.02846),
-        ('l_w_7', 0.02649),
-        ('load_20.L_m', 0.02483),
-        ('l_w_22', 0.02205),
-        ('load_4.zeta_s', 0.01913),
-        ('load_10.zeta_s', 0.01865),
-        ('load_16.zeta_s', 0.01823),
-        ('load_7.R_s', 0.01668),
-        ('load_7.zeta_s', 0.01321),
-        ('load_10.delta_1', 0.00174),
-        ('load_16.delta_1', 0.00162),
-        ('load_4.delta_1', 0.00162),
-        ('load_10.delta_2', 0.00083),
-        ('load_16.delta_2', 0.00078),
-        ('load_7.delta_1', 0.00076),
-        ('load_4.delta_2', 0.00074),
-        ('load_7.delta_2', 0.00045),
-        ('load_4.omega_0p', 0.00000),
-        ('load_16.R_p', 0.00000),
-        ('load_16.omega_0p', 0.00000),
-        ('load_10.omega_0p', 0.00000),
-        ('load_4.R_p', 0.00000),
-        ('load_4.zeta_p', 0.00000),
-        ('load_16.zeta_p', 0.00000),
-        ('load_10.R_p', 0.00000),
-        ('load_7.R_p', 0.00000),
-        ('load_10.zeta_p', 0.00000),
-        ('load_7.omega_0p', 0.00000),
-        ('load_7.zeta_p', 0.00000),
-    ]
-
-    sorted_keys = [k for k, _ in sorted_results]
-    sensitivities = [v for _, v in sorted_results]
-    selected_keys = sorted_keys[:p]
-
-    # Print results
-    print("\n--- Prior-Averaged Sensitivity Results (Hardcoded) ---")
-    for i, (key, sens) in enumerate(sorted_results):
-        print(f"{key}: {sens:.5f}%")
-        if i == p - 1:
-            print(f"--- Top {p} selected above this line ---")
-
-    # Set inferred=False for ALL parameters first
-    for cable_name in network_params["cable_lengths"]:
-        network_params["cable_lengths"][cable_name]["inferred"] = False
-    for load_name in network_params["loads"]:
-        for param_name in network_params["loads"][load_name]:
-            network_params["loads"][load_name][param_name]["inferred"] = False
-    if "fault_parameters" in network_params:
-        for fault_name in network_params["fault_parameters"]:
-            network_params["fault_parameters"][fault_name]["inferred"] = False
-
-    # Set inferred=True only for selected top_p parameters
-    enabled_count = 0
-    for param_key in selected_keys:
-        if "." in param_key:
-            # Load parameter: "load_0.C_m_leak"
-            parts = param_key.split(".")
-            load_name, param_name = parts[0], parts[1]
-            if load_name in network_params["loads"]:
-                if param_name in network_params["loads"][load_name]:
-                    network_params["loads"][load_name][param_name]["inferred"] = True
-                    enabled_count += 1
-        else:
-            # Cable length parameter
-            if param_key in network_params["cable_lengths"]:
-                network_params["cable_lengths"][param_key]["inferred"] = True
-                enabled_count += 1
-
-    print(f"\nEnabled inference for {enabled_count} parameters (top {p})")
-
-    return selected_keys, sorted_keys, sensitivities
 
 def perform_local_prior_averaged_sensitivity_analysis(alpha, M, scenario):
     """
@@ -2583,9 +2431,18 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     if OUTPUT_DIR:
         filename = os.path.join(OUTPUT_DIR, filename)
 
+    # Save plot data
+    plot_data = {'snr_dbs': np.array(snr_dbs)}
+    for key in selected_keys:
+        if key in rmse_results and len(rmse_results[key]) > 0:
+            plot_data[f'rmse_{key}'] = np.array(rmse_results[key])
+        if key in crlb_results and len(crlb_results[key]) > 0:
+            plot_data[f'crlb_{key}'] = np.array(crlb_results[key])
+    np.savez(filename.replace('.pdf', '.npz'), **plot_data)
+
     plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.show()
-    print(f"\nSaved plot to {filename}")
+    print(f"Saved: {filename}, {filename.replace('.pdf', '.npz')}")
 
 
 def plot_nll_vs_L1_complex_mtl(snr_db):
@@ -2752,7 +2609,7 @@ if __name__ == '__main__':
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"\n=== Output folder: {OUTPUT_DIR} ===")
 
-    param_order_list, P = get_inferred_param_order() #P = total number of network params (exluding fault)
+    param_order_list, P = get_inferred_param_order() 
     g = torch.Generator()
     g.manual_seed(seed)
     theta_true3 = torch.full([P], 0.25)
@@ -2780,7 +2637,6 @@ if __name__ == '__main__':
     # H_clean = calculate_Hnw_nofault(cable_lengths, load_params) #[F] when all inputs are scalars
     # sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    # selected_s1, sorted_keys_s1, sensitivities = get_hardcoded_prior_averaged_sensitivity()
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_prior_averaged_sensitivity_analysis(alpha, 100, "no_fault")
     selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis()
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
@@ -2812,40 +2668,39 @@ if __name__ == '__main__':
         var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
         # Standard CRLB + RMSE
-        # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
-        # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
-        # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
-
+        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
+        mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
+        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
         # Bayesian CRLB + BRMSE
-        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, M2)
-        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
-        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        # bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, M2)
+        # bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed)
+        # print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        # print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
        #  Store results for plotting
-        # for key in selected_s1:
-        #     if key in mse and key in crlb_u1u1t_dict:
-        #         rmse_results[key].append(math.sqrt(mse[key]))
-        #         crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+        for key in selected_s1:
+            if key in mse and key in crlb_u1u1t_dict:
+                rmse_results[key].append(math.sqrt(mse[key]))
+                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
         
         # Store results for plotting
-        for key in selected_s1:
-            if key in bayesian_mse and key in bcrlb_dict:
-                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        # for key in selected_s1:
+        #     if key in bayesian_mse and key in bcrlb_dict:
+        #         bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+        #         bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
         
-    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
-    #                           is_bayesian=False, M=M)
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
-                               is_bayesian=True, M=M, alpha=alpha)
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s1, p, seed,
+                               is_bayesian=False, M=M)
+    #plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s1, p, seed,
+    #                           is_bayesian=True, M=M, alpha=alpha)
 
     
     print("My program took", time.time() - start_time, "to run")
 
-    # Zip the output folder
+    # Zip the output folder and remove it
     zip_filename = f"{OUTPUT_DIR}.zip"
     shutil.make_archive(OUTPUT_DIR, 'zip', OUTPUT_DIR)
-    print(f"\n=== All outputs saved to: {OUTPUT_DIR}/ ===")
-    print(f"=== Zipped to: {zip_filename} ===")
+    shutil.rmtree(OUTPUT_DIR)  # Remove the folder, keep only the zip
+    print(f"\n=== All outputs zipped to: {zip_filename} ===")
