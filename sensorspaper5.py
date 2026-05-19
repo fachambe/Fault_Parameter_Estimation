@@ -29,14 +29,14 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
-NUM_STEPS = 500 #Num of SVI steps
+NUM_STEPS = 250 #Num of SVI steps
 NUM_PARTICLES = 12  # Number of particles for SVI
-VECTORIZE_PARTICLES = False  # Whether to vectorize particles (faster but uses more memory)
+VECTORIZE_PARTICLES = False # Whether to vectorize particles (faster but uses more memory)
 p = 3 #Number of inferred network parameters in Stage 1. For stage 2 just set to 3 since always inferring the 3 fault parameters. 
-seed = 95
+seed = 98
 M = 25 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
-alpha = 3.0 #Hyperparameter of beta prior
+alpha = 5.0 #Hyperparameter of beta prior
 IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
 SCENARIO = "with_fault" #Forward model contains fault or not (stage 2 vs stage 1 respectively)
 
@@ -997,9 +997,10 @@ def calculate_Hnw(cable_lengths, load_params, fault_params):
     H_trans = calculate_Htrans(YTalpha, YTbeta, YTgamma, Y_node6, ZT0, ZT12, ZT12, ZT13, ZT13, ZT23, ZT23)
     hoverall = h1 @ h2 @ h3 @ h4 @ h5
     #hoverall = h5 @ h4 @ h3 @ h2 @ h1
-    H1 = hoverall @ H_trans 
+    H1 = hoverall @ H_trans
     H_nw = H1[:, 0, 0]
     return H_nw
+
 
 def model_no_fault(H1_noisy, std_f):
     """
@@ -1072,7 +1073,8 @@ def model_with_fault(H1_noisy, std_f):
         load_dict = {}
         for param_name, param_info in params.items():
             if param_info["inferred"]:
-                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
+                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(alpha, alpha))
+                #norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
                 load_dict[param_name] = norm_sample
             else:
                 load_dict[param_name] = torch.tensor(param_info["value"], device=device)
@@ -1083,7 +1085,7 @@ def model_with_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            norm_sample = pyro.sample(f"{cable_name}", dist.Uniform(0.0, 1.0))
+            norm_sample = pyro.sample(cable_name, dist.Beta(alpha, alpha))
             cable_lengths[cable_name] = norm_sample
         else:
             cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
@@ -1092,24 +1094,14 @@ def model_with_fault(H1_noisy, std_f):
     fault_params = {}
     for fault_name, fault_info in network_params["fault_parameters"].items():
         if fault_info["inferred"]:
-            norm_sample = pyro.sample(f"{fault_name}", dist.Uniform(0.0, 1.0))
+            norm_sample = pyro.sample(fault_name, dist.Beta(alpha, alpha))
             fault_params[fault_name] = norm_sample
         else:
             fault_params[fault_name] = torch.tensor(fault_info["value"], device=device)
 
-
-    #[F]
-    H1_pred_c = calculate_Hnw(cable_lengths, load_params, fault_params)
-
-    # Handle both vectorized [P, F] and non-vectorized [F] cases
-    if H1_pred_c.dim() == 1:
-        # Non-vectorized: [F] -> [N, F]
-        H1_pred_c = H1_pred_c.unsqueeze(0).expand(N, -1)
-    else:
-        # Vectorized: [P, F] -> [P, N, F] (insert N before F)
-        H1_pred_c = H1_pred_c.unsqueeze(-2).expand(*H1_pred_c.shape[:-1], N, H1_pred_c.shape[-1])
-
-    H1_pred = torch.view_as_real(H1_pred_c) #[P, N, F, 2]
+    H1_pred_c = calculate_Hnw(cable_lengths, load_params, fault_params) #[F]
+    H1_pred_c = H1_pred_c.unsqueeze(0).expand(N, -1) #[N, F]
+    H1_pred = torch.view_as_real(H1_pred_c) #[N, F, 2]
 
     with pyro.plate("data", N):
         pyro.sample(
@@ -2307,7 +2299,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, alpha, M, seed):
     Returns:
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
-    # Set seeds for reproducibility
+    # Set seeds for reproducibility - ensures same θ_true values at every SNR
     torch.manual_seed(seed)
     pyro.set_rng_seed(seed)
 
@@ -2641,6 +2633,28 @@ if __name__ == '__main__':
     selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis()
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
     #selected_s1 = []
+
+    # === DEBUG: Plot NLL landscape for a problematic theta ===
+    # Uncomment to visualize loss landscape for specific theta values
+    # Case 1: fault in 0-0.5 range
+    # network_params["fault_parameters"]["fault_position"]["value"] = 0.2704
+    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.6258
+    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.7766
+
+    # Case 2: fault in 0.5-1.0 range
+    # network_params["fault_parameters"]["fault_position"]["value"] = 0.8436
+    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5186
+    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.5581
+
+    # Case 3: seed 102 values
+    # network_params["fault_parameters"]["fault_position"]["value"] = 0.2089
+    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5640
+    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3487
+    # plot_nll_vs_L1_complex_mtl(40)
+    # plot_nll_vs_ZFre_complex_mtl(40)
+    # plot_nll_vs_ZFim_complex_mtl(40)
+    # exit()  # Stop after plotting
+    # === END DEBUG ===
     
     #plot_nll_vs_L1_complex_mtl(40.0)
     #plot_nll_vs_ZFre_complex_mtl(40.0)
