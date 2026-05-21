@@ -126,8 +126,8 @@ print(f"Using device: {device}")
 #frequencies = torch.logspace(torch.log10(torch.tensor(150e3)), torch.log10(torch.tensor(30e6)), 200) #150KHz - 30MHz
 #frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
 #                              torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
-frequencies = torch.logspace(torch.log10(torch.tensor(50e3, device=device)),
-                               torch.log10(torch.tensor(5e6, device=device)), 200, device=device) #150KHz - 500KHz
+frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
+                               torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
 freq_range_mhz = frequencies / 1e6
 omega = 2 * torch.pi * frequencies
 num_freqs = len(omega)
@@ -2545,8 +2545,10 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
     snr_db = 40  # Always run at 40dB for bad seed detection
     snr_lin = 10.0 ** (snr_db / 10.0)
 
-    # Set seeds for reproducibility
+    # Pre-generate ALL theta values to ensure consistency across functions
     torch.manual_seed(seed)
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    all_thetas = beta_dist.sample((M, p))
     pyro.set_rng_seed(seed)
 
     param_order_list, _ = get_inferred_param_order()
@@ -2558,9 +2560,8 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
     for m in range(M):
         print(f"Trial {m+1}/{M}")
 
-        # 1. Sample true theta from prior
-        beta_dist = torch.distributions.Beta(alpha, alpha)
-        theta_true_normalized = beta_dist.sample((p,))
+        # 1. Get pre-generated theta for this trial
+        theta_true_normalized = all_thetas[m]
 
         # 2. Set network_params to this sampled theta
         set_network_params_from_normalized(theta_true_normalized, param_order_list)
@@ -2654,8 +2655,10 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
     Returns:
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
-    # Set seeds for reproducibility - ensures same θ_true values at every SNR
+    # Pre-generate ALL theta values to ensure consistency across functions
     torch.manual_seed(seed)
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    all_thetas = beta_dist.sample((M, p))
     pyro.set_rng_seed(seed)
 
     param_order_list, _ = get_inferred_param_order()
@@ -2677,16 +2680,14 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
 ])
 
     for m in range(M):
+        # 1. Get pre-generated theta for this trial
+        theta_true_normalized = all_thetas[m]
+
         if m in bad_seed_indices:
             print(f"Trial {m+1}: Skipping (bad seed)")
             continue
         else:
             print(f"Trial {m+1}/{M}")
-
-            # 1. Sample true theta from prior
-            beta_dist = torch.distributions.Beta(alpha, alpha)
-            theta_true_normalized = beta_dist.sample((p,))
-
             # 2. Set network_params to this sampled theta
             set_network_params_from_normalized(theta_true_normalized, param_order_list)
 
@@ -3035,8 +3036,6 @@ if __name__ == '__main__':
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_prior_averaged_sensitivity_analysis(alpha, 100, "no_fault")
     selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis()
     bad_seed_indices = determine_bad_seeds_at_40dB(selected_s1)
-    exit()
-    #bad_seed_indices = [16, 20, 22, 23, 34, 39, 45, 50, 56, 64, 67, 70, 75, 80, 81, 95]
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
     #selected_s1 = []
 
@@ -3080,8 +3079,8 @@ if __name__ == '__main__':
     #)
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    snr_dbs = [40]
-    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    #snr_dbs = [40]
+    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
