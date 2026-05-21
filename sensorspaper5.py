@@ -40,11 +40,6 @@ alpha = 5.0 #Hyperparameter of beta prior
 IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
 SCENARIO = "with_fault" #Forward model contains fault or not (stage 2 vs stage 1 respectively)
 
-if IS_BAYESIAN:
-    OUTPUT_DIR = f"bayesian_p{p}_M{M}_seed{seed}"
-else:
-    OUTPUT_DIR = f"frequentist_p{p}_M{M}_seed{seed}"
-
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
     3,  # load_0 R6-O3  Motor
@@ -129,8 +124,10 @@ print(f"Using device: {device}")
 
 #frequencies = torch.logspace(torch.log10(torch.tensor(2e6)), torch.log10(torch.tensor(10e6)), 500) #2-10MHz
 #frequencies = torch.logspace(torch.log10(torch.tensor(150e3)), torch.log10(torch.tensor(30e6)), 200) #150KHz - 30MHz
-frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
-                              torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
+#frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
+#                              torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
+frequencies = torch.logspace(torch.log10(torch.tensor(50e3, device=device)),
+                               torch.log10(torch.tensor(5e6, device=device)), 200, device=device) #150KHz - 500KHz
 freq_range_mhz = frequencies / 1e6
 omega = 2 * torch.pi * frequencies
 num_freqs = len(omega)
@@ -146,6 +143,13 @@ def format_freq(f_hz):
 f_start_str = format_freq(frequencies[0].item())
 f_end_str = format_freq(frequencies[-1].item())
 FILENAME_PREFIX = f"{f_start_str}-{f_end_str}_{OPTIMIZER}_lr{LR}"
+
+# Output directory includes frequency range
+freq_range_str = f"{f_start_str}-{f_end_str}"
+if IS_BAYESIAN:
+    OUTPUT_DIR = f"bayesian_p{p}_M{M}_seed{seed}_{freq_range_str}"
+else:
+    OUTPUT_DIR = f"frequentist_p{p}_M{M}_seed{seed}_{freq_range_str}"
 
 #Transmitter/Receiver Constants
 Z_RG = Z_R1 = Z_R2 = 50.0
@@ -2343,7 +2347,7 @@ def perform_local_sensitivity_analysis():
     sensitivities = [sensitivity_dict[k] * 100 for k in sorted_params]
     
     # Print results
-    print("\n--- LOCAL Sensitivity Analysis (at θ_true) ---")
+    print("\n--- LOCAL Sensitivity Analysis (at theta_true) ---")
     for idx, k in enumerate(sorted_params):
         if idx == p:
             print(f"--- Top {p} selected above this line ---")
@@ -2547,6 +2551,7 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
 
     param_order_list, _ = get_inferred_param_order()
     bad_seed_indices = []
+    rows = []  # For CSV output
 
     print(f"=== Determining bad seeds at {snr_db}dB SNR ===")
 
@@ -2587,11 +2592,40 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
         L1_true = network_params["fault_parameters"]["fault_position"]["value"]
         fp_error = abs(L1_svi - L1_true)
 
-        if fp_error > error_threshold:
+        Zr_svi = posterior_means["Z_fault_real"]
+        Zr_true = network_params["fault_parameters"]["Z_fault_real"]["value"]
+        rmse_Zr = np.sqrt((Zr_svi - Zr_true)**2)
+
+        Zi_svi = posterior_means["Z_fault_imag"]
+        Zi_true = network_params["fault_parameters"]["Z_fault_imag"]["value"]
+        rmse_Zi = np.sqrt((Zi_svi - Zi_true)**2)
+
+        is_bad_seed = fp_error > error_threshold
+        if is_bad_seed:
             print(f"  -> BAD SEED: fault_position error = {fp_error:.4f}")
             bad_seed_indices.append(m)
         else:
             print(f"  -> Good seed: fault_position error = {fp_error:.4f}")
+
+        # Collect row for CSV
+        rows.append({
+            "Runs": m + 1,
+            "Fault Location (SVI)": L1_svi,
+            "Fault Location (True)": L1_true,
+            "Fault Location (RMSE)": fp_error,
+            "Z_fault_real (SVI)": Zr_svi,
+            "Z_fault_real (True)": Zr_true,
+            "Z_fault_real RMSE": rmse_Zr,
+            "Z_fault_imag (SVI)": Zi_svi,
+            "Z_fault_imag (True)": Zi_true,
+            "Z_fault_imag RMSE": rmse_Zi,
+            "Is Bad Seed": is_bad_seed
+        })
+
+        # Save CSV after each trial (incremental save)
+        df = pd.DataFrame(rows)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        df.to_csv(os.path.join(OUTPUT_DIR, f"bad_seed_detection_{snr_db}dB.csv"), index=False)
 
     print(f"\n=== Bad seed detection complete ===")
     print(f"Total bad seeds: {len(bad_seed_indices)} / {M}")
@@ -3000,8 +3034,9 @@ if __name__ == '__main__':
 
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_prior_averaged_sensitivity_analysis(alpha, 100, "no_fault")
     selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis()
-    #bad_seed_indices = determine_bad_seeds_at_40dB(selected_s1)
-    bad_seed_indices = [16, 20, 22, 23, 34, 39, 45, 50, 56, 64, 67, 70, 75, 80, 81, 95]
+    bad_seed_indices = determine_bad_seeds_at_40dB(selected_s1)
+    exit()
+    #bad_seed_indices = [16, 20, 22, 23, 34, 39, 45, 50, 56, 64, 67, 70, 75, 80, 81, 95]
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
     #selected_s1 = []
 
@@ -3021,6 +3056,15 @@ if __name__ == '__main__':
     # network_params["fault_parameters"]["fault_position"]["value"] = 0.2089
     # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5640
     # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3487
+
+    # Case 4: Trial 17 bad seed (high L1, low Zr)
+    # network_params["fault_parameters"]["fault_position"]["value"] = 0.7008
+    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.2864
+    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3368
+
+    # network_params["fault_parameters"]["fault_position"]["value"] = 0.696311
+    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.58787
+    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.539178
     # plot_nll_vs_L1_complex_mtl(40)
     # plot_nll_vs_ZFre_complex_mtl(40)
     # plot_nll_vs_ZFim_complex_mtl(40)
@@ -3036,8 +3080,8 @@ if __name__ == '__main__':
     #)
     #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    #snr_dbs = [40]
-    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs = [40]
+    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     rmse_results = {key: [] for key in selected_s1}
     crlb_results = {key: [] for key in selected_s1}
