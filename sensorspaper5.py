@@ -176,8 +176,8 @@ network_params = {
         "r_w_room": {"value": 0.25, "inferred": False, "range": (0.81e-3, 1.29e-3)}
     },
     "fault_parameters": {
-        # Normalized position [0, 1], will be scaled to [0, L] in forward model
-        "fault_position": {"value": 0.25, "inferred": True, "range": (0.0, 1.0)},
+        # Normalized position [0.3, 0.7], will be scaled to [0.3L, 0.7L] in forward model
+        "fault_position": {"value": 0.25, "inferred": True, "range": (0.3, 0.7)},
         # Complex fault impedance Z_fault = Z_fault_real + j*Z_fault_imag
         "Z_fault_real": {"value": 0.1, "inferred": True, "range": (0.0, 1000.0)},
         "Z_fault_imag": {"value": 0.25, "inferred": True, "range": (-100.0, 100.0)}
@@ -2433,24 +2433,26 @@ def beta_prior_fim_closed_form(alpha):
     J_pi = j_pi_scalar * torch.eye(p)  # Diagonal
     return J_pi
 
-def compute_expected_data_fim(snr_db, alpha, num_samples=100):
+def compute_expected_data_fim(snr_db, all_thetas):
     """
     Compute E_π[I(θ)] via Monte Carlo.
+
+    Args:
+        snr_db: SNR in dB
+        all_thetas: Pre-generated theta samples [M, p]
 
     Returns:
         E_I: Expected data FIM [p, p]
     """
     snr_lin = 10.0 ** (snr_db / 10.0)
+    num_samples = all_thetas.shape[0]
 
-    # Sample parameter values from prior
-    beta_dist = torch.distributions.Beta(alpha, alpha)
-    theta_samples = beta_dist.sample((num_samples, p))  # [num_samples, p]
     # Accumulate FIMs
     E_I = torch.zeros(p, p)
     param_order_list, _ = get_inferred_param_order()
     for m in range(num_samples):
         print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
-        set_network_params_from_normalized(theta_samples[m], param_order_list)
+        set_network_params_from_normalized(all_thetas[m], param_order_list)
 
         # Compute H_clean for this theta
         cable_lengths, load_params, fault_params = build_params_from_flat(get_true_param_flat(), param_order_list)
@@ -2486,22 +2488,22 @@ def key_to_tuple(key):
         return ('cable', key, None)
     
 
-def compute_real_BCRLB(snr_db, selected_keys, alpha, num_samples=100):
+def compute_real_BCRLB(snr_db, selected_keys, alpha, all_thetas):
     """
     Compute Bayesian CRLB.
-    
+
     Args:
         snr_db: SNR in dB
         selected_keys: List of parameter keys to extract (in desired order)
         alpha: Beta prior parameter
-        num_samples: Number of MC samples for E[I(θ)]
-    
+        all_thetas: Pre-generated theta samples [M, p] (same as used for RMSE)
+
     Returns:
         bcrlb_dict: {param_name: BCRLB_value} in selected_keys order
     """
 
-    # Compute E[I(θ)]
-    E_I = compute_expected_data_fim(snr_db, alpha, num_samples)
+    # Compute E[I(θ)] using same theta samples as RMSE
+    E_I = compute_expected_data_fim(snr_db, all_thetas)
     #print("E_I shape", E_I.shape)
     #print("E_I", E_I)
     
@@ -2531,12 +2533,13 @@ def compute_real_BCRLB(snr_db, selected_keys, alpha, num_samples=100):
             print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
     return bcrlb_dict
 
-def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
+def determine_bad_seeds_at_40dB(selected_s1, all_thetas, error_threshold=0.1):
     """
     Run SVI at 40dB SNR to determine which trial indices produce bad convergence.
 
     Args:
         selected_s1: List of parameter keys to infer
+        all_thetas: Pre-generated theta samples [M, p]
         error_threshold: Fault position error threshold for "bad" seed (default 0.1)
 
     Returns:
@@ -2544,12 +2547,7 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
     """
     snr_db = 40  # Always run at 40dB for bad seed detection
     snr_lin = 10.0 ** (snr_db / 10.0)
-
-    # Pre-generate ALL theta values to ensure consistency across functions
-    torch.manual_seed(seed)
-    beta_dist = torch.distributions.Beta(alpha, alpha)
-    all_thetas = beta_dist.sample((M, p))
-    pyro.set_rng_seed(seed)
+    M_samples = all_thetas.shape[0]
 
     param_order_list, _ = get_inferred_param_order()
     bad_seed_indices = []
@@ -2557,8 +2555,8 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
 
     print(f"=== Determining bad seeds at {snr_db}dB SNR ===")
 
-    for m in range(M):
-        print(f"Trial {m+1}/{M}")
+    for m in range(M_samples):
+        print(f"Trial {m+1}/{M_samples}")
 
         # 1. Get pre-generated theta for this trial
         theta_true_normalized = all_thetas[m]
@@ -2582,9 +2580,9 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
         # 4. Run SVI to get estimate
         pyro.clear_param_store()
         if SCENARIO == "with_fault":
-            losses, param_history = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, m, M)
+            losses, param_history = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, m, M_samples)
         else:
-            losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M)
+            losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M_samples)
 
         # 5. Extract posterior mean and check convergence
         posterior_means = extract_posterior_means(param_history)
@@ -2629,20 +2627,20 @@ def determine_bad_seeds_at_40dB(selected_s1, error_threshold=0.1):
         df.to_csv(os.path.join(OUTPUT_DIR, f"bad_seed_detection_{snr_db}dB.csv"), index=False)
 
     print(f"\n=== Bad seed detection complete ===")
-    print(f"Total bad seeds: {len(bad_seed_indices)} / {M}")
+    print(f"Total bad seeds: {len(bad_seed_indices)} / {M_samples}")
     print(f"Bad seed indices: {bad_seed_indices}")
 
     return bad_seed_indices
 
 
-def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
+def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices, all_thetas):
     """
     Compute Bayesian MSE via Monte Carlo at specific SNR.
 
     IMPORTANT: Run determine_bad_seeds_at_40dB() first to get bad_seed_indices.
 
     For each trial:
-      1. Sample θ_true ~ Beta(α, α)
+      1. Use pre-generated θ_true
       2. Generate data y ~ p(y|θ_true)
       3. Run SVI to get estimate θ̂
       4. Compute (θ̂ - θ_true)²
@@ -2651,16 +2649,12 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
         snr_db: SNR level in dB
         selected_s1: List of parameter keys to infer
         bad_seed_indices: List of trial indices to skip (from determine_bad_seeds_at_40dB)
+        all_thetas: Pre-generated theta samples [M, p] (same as used for BCRLB)
 
     Returns:
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
-    # Pre-generate ALL theta values to ensure consistency across functions
-    torch.manual_seed(seed)
-    beta_dist = torch.distributions.Beta(alpha, alpha)
-    all_thetas = beta_dist.sample((M, p))
-    pyro.set_rng_seed(seed)
-
+    M_samples = all_thetas.shape[0]
     param_order_list, _ = get_inferred_param_order()
     squared_errors = {key: [] for key in selected_s1}
     snr_lin = 10.0 ** (snr_db / 10.0)
@@ -2679,7 +2673,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
     "Z_fault_imag RMSE"
 ])
 
-    for m in range(M):
+    for m in range(M_samples):
         # 1. Get pre-generated theta for this trial
         theta_true_normalized = all_thetas[m]
 
@@ -2687,7 +2681,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
             print(f"Trial {m+1}: Skipping (bad seed)")
             continue
         else:
-            print(f"Trial {m+1}/{M}")
+            print(f"Trial {m+1}/{M_samples}")
             # 2. Set network_params to this sampled theta
             set_network_params_from_normalized(theta_true_normalized, param_order_list)
 
@@ -2707,9 +2701,9 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
             # 4. Run SVI to get estimate
             pyro.clear_param_store()
             if SCENARIO == "with_fault":
-                losses, param_history = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, m, M)
+                losses, param_history = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, m, M_samples)
             else:
-                losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M)
+                losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, m, M_samples)
 
             # 5. Extract posterior mean
             posterior_means = extract_posterior_means(param_history)
@@ -2744,11 +2738,11 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices):
             # Save to CSV (separate file per SNR)
             df.to_csv(os.path.join(OUTPUT_DIR, f"svi_fault_results_{snr_db}dB.csv"), index=False)        
 
-            # Plot TF vs reconstructed TF from these posterior means - just plot for last seed
-            if m == M-1:
+            # Plot TF vs reconstructed TF from these posterior means
+            if m == 0:
                 plot_CI_and_pred_TF(param_history, seed, snr_db)
 
-            # 6. Compute squared errors vs sampled true θ only for good seeds
+            # 6. Compute squared errors vs sampled true θ 
             for key in selected_s1:
                 # Get true value directly from network_params
                 true_val = get_true_param_value(key)
@@ -2989,7 +2983,7 @@ if __name__ == '__main__':
     print(f"Total number of fault parameters: {num_fault_params}")
     print(f"Total number of network parameters: {total_params + num_cable_params + num_fault_params}")
     print(f"Load type distribution: {load_types}")
-
+    
     # Turn OFF cable/load inference for stage 2
     for cable_name in network_params["cable_lengths"]:
         network_params["cable_lengths"][cable_name]["inferred"] = False
@@ -3006,25 +3000,6 @@ if __name__ == '__main__':
     print(f"\n=== Output folder: {OUTPUT_DIR} ===")
 
     param_order_list, P = get_inferred_param_order() 
-    g = torch.Generator()
-    g.manual_seed(seed)
-    theta_true3 = torch.full([P], 0.25)
-    a, b = 0.3, 0.7
-    theta_true = a + (b - a) * torch.rand(P, generator=g)
-    beta_dist = torch.distributions.Beta(alpha, alpha)
-    theta_true2 = torch.zeros(P)
-    for i in range(P):
-        # Beta uses gamma internally, which respects torch's RNG
-        # torch.manual_seed(seed + i)  # Different seed per param but reproducible
-        theta_true2[i] = beta_dist.sample()
-
-    theta_true4 = torch.zeros(P)
-    for i, param_tuple in enumerate(param_order_list):
-        if param_tuple[0] == "cable":  # Cable length parameter
-            torch.manual_seed(seed + i)
-            theta_true4[i] = beta_dist.sample()
-        else:  # Load parameter
-            theta_true4[i] = 0.25
     #set_network_params_from_normalized(theta_true2, param_order_list)
     params_flat = get_true_param_flat()
     cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
@@ -3035,7 +3010,18 @@ if __name__ == '__main__':
 
     # selected_s1, sorted_keys_s1, sensitivities = perform_local_prior_averaged_sensitivity_analysis(alpha, 100, "no_fault")
     selected_s1, sorted_keys_s1, sensitivities = perform_local_sensitivity_analysis()
-    bad_seed_indices = determine_bad_seeds_at_40dB(selected_s1)
+
+    # Generate all theta samples ONCE for consistency across BCRLB and RMSE
+    torch.manual_seed(seed)
+    beta_dist = torch.distributions.Beta(alpha, alpha)
+    all_thetas = beta_dist.sample((M, p))
+    print(f"Generated {M} theta samples for Monte Carlo (seed={seed})")
+    print("all thetas", all_thetas)
+    # Determine bad seeds (or use empty list with restricted [0.3, 0.7] range)
+    # bad_seed_indices = determine_bad_seeds_at_40dB(selected_s1, all_thetas)
+    # Hardcoded bad seeds from bad_seed_detection_40dB.csv (seed=98, 149khz-10mhz, M=100, range [0,1])
+    # With range [0.3, 0.7], expect no bad seeds
+    bad_seed_indices = []
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
     #selected_s1 = []
 
@@ -3061,9 +3047,9 @@ if __name__ == '__main__':
     # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.2864
     # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3368
 
-    # network_params["fault_parameters"]["fault_position"]["value"] = 0.696311
-    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.58787
-    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.539178
+    # network_params["fault_parameters"]["fault_position"]["value"] = 0.761504
+    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.499150
+    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.53396588
     # plot_nll_vs_L1_complex_mtl(40)
     # plot_nll_vs_ZFre_complex_mtl(40)
     # plot_nll_vs_ZFim_complex_mtl(40)
@@ -3092,18 +3078,18 @@ if __name__ == '__main__':
         print(f"\n{'='*50}")
         print(f"SNR = {snr_db} dB")
         print('='*50)
-        snr_lin = 10.0 ** (snr_db / 10.0)
-        var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
+        # snr_lin = 10.0 ** (snr_db / 10.0)
+        # var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
-        # Standard CRLB + RMSE
+        # Standard (Frequentist) CRLB + RMSE
         # crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s1, sensitivities)
         # mse = calculate_mse_monte_carlo(var_f, selected_s1, snr_db, M, seed)
         # print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
         # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
-        # Bayesian CRLB + BRMSE
-        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, M2)
-        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices)
+        # Bayesian CRLB + BRMSE (using same theta samples for consistency)
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, all_thetas)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices, all_thetas)
         print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
         print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
