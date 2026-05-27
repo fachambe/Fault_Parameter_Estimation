@@ -27,7 +27,7 @@ from pyro.infer import SVI, Trace_ELBO
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
-OUTPUT_DIR = "two_stage_results_S1=20dB" #Name of output folder to save plots
+OUTPUT_DIR = "two_stage_results_S1=10dB" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
@@ -3185,7 +3185,7 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params) #[F]
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    snr_db = 20
+    snr_db = 10
     print(f"\n{'='*50}")
     print(f"SNR = {snr_db} dB for Stage 1 Network Parameter Calibration")
     print('='*50)
