@@ -27,17 +27,15 @@ from pyro.infer import SVI, Trace_ELBO
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
+OUTPUT_DIR = "two_stage_results_S1=40dB" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
-p = 3 #Number of inferred network parameters in Stage 1. For stage 2 just set to 3 since always inferring the 3 fault parameters. 
-seed = 98 #Seed for theta_true for Bayesian Results
+SEED = 98 #Seed for theta_true for Bayesian Results
 M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
-alpha = 5.0 #Hyperparameter of beta prior
-IS_BAYESIAN = True #Return frequentist RMSE vs CRLB or Bayesian RMSE vs BCRLB
-SCENARIO = "with_fault" #Forward model contains fault or not (stage 2 vs stage 1 respectively)
+ALPHA = 5.0 #Hyperparameter of beta prior
 
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
@@ -141,16 +139,10 @@ def format_freq(f_hz):
 
 f_start_str = format_freq(frequencies[0].item())
 f_end_str = format_freq(frequencies[-1].item())
+freq_range_str = f"{f_start_str}-{f_end_str}"
 FILENAME_PREFIX = f"{f_start_str}-{f_end_str}_{OPTIMIZER}_lr{LR}"
 
-# Output directory includes frequency range
-freq_range_str = f"{f_start_str}-{f_end_str}"
-# if IS_BAYESIAN:
-#     OUTPUT_DIR = f"bayesian_p{p}_M{M}_seed{seed}_{freq_range_str}"
-# else:
-#     OUTPUT_DIR = f"frequentist_p{p}_M{M}_seed{seed}_{freq_range_str}"
 
-OUTPUT_DIR = "two_stage_results"
 #Transmitter/Receiver Constants
 Z_RG = Z_R1 = Z_R2 = 50.0
 Z_R3 = 50.0
@@ -165,7 +157,7 @@ Y_rec = Y_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
 
 BACKBONE_KEYS = ["l_w_0", "l_w_1", "l_w_4", "l_w_25", "l_w_28"]
 
-# ---- Define Network Parameter Dictionary ----
+# ---- Global Network Parameter Dictionary ----
 network_params = {
     "cable_lengths": {  # 30 parameters, set all to 0.25
         f"l_w_{i}": {"value": 0.25, "inferred": True, "range": (6, 8)}
@@ -1254,7 +1246,7 @@ def model_no_fault(H1_noisy, std_f):
         load_dict = {}
         for param_name, param_info in params.items():
             if param_info["inferred"]:
-                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(alpha, alpha))
+                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(ALPHA, ALPHA))
                 load_dict[param_name] = norm_sample
             else:
                 load_dict[param_name] = torch.tensor(param_info["value"], device=device)
@@ -1265,7 +1257,7 @@ def model_no_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            norm_sample = pyro.sample(f"{cable_name}", dist.Beta(alpha, alpha))
+            norm_sample = pyro.sample(f"{cable_name}", dist.Beta(ALPHA, ALPHA))
             cable_lengths[cable_name] = norm_sample
         else:
             cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
@@ -1309,7 +1301,7 @@ def model_with_fault(H1_noisy, std_f):
         load_dict = {}
         for param_name, param_info in params.items():
             if param_info["inferred"]:
-                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(alpha, alpha))
+                norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Beta(ALPHA, ALPHA))
                 #norm_sample = pyro.sample(f"{load_name}_{param_name}", dist.Uniform(0.0, 1.0))
                 load_dict[param_name] = norm_sample
             else:
@@ -1321,7 +1313,7 @@ def model_with_fault(H1_noisy, std_f):
     cable_lengths = {}
     for cable_name, cable_info in network_params["cable_lengths"].items():
         if cable_info["inferred"]:
-            norm_sample = pyro.sample(cable_name, dist.Beta(alpha, alpha))
+            norm_sample = pyro.sample(cable_name, dist.Beta(ALPHA, ALPHA))
             cable_lengths[cable_name] = norm_sample
         else:
             cable_lengths[cable_name] = torch.tensor(cable_info["value"], device=device)
@@ -1330,7 +1322,7 @@ def model_with_fault(H1_noisy, std_f):
     fault_params = {}
     for fault_name, fault_info in network_params["fault_parameters"].items():
         if fault_info["inferred"]:
-            norm_sample = pyro.sample(fault_name, dist.Beta(alpha, alpha))
+            norm_sample = pyro.sample(fault_name, dist.Beta(ALPHA, ALPHA))
             fault_params[fault_name] = norm_sample
         else:
             fault_params[fault_name] = torch.tensor(fault_info["value"], device=device)
@@ -1998,7 +1990,7 @@ def plot_param_convergence(param_history, posterior_means, snr_db, losses, sorte
         df.to_csv(filename_csv, index=False)
         print(f"Saved to {filename_csv}")
 
-def plot_CI_and_pred_TF(best_params, snr_db, scenario, num_samples=200, true_params_flat=None, true_param_order=None):
+def plot_CI_and_pred_TF(best_params, snr_db, scenario, is_Bayesian, num_samples=200, true_params_flat=None, true_param_order=None):
     """
     Plot credible interval and predicted TF vs true TF.
 
@@ -2100,11 +2092,8 @@ def plot_CI_and_pred_TF(best_params, snr_db, scenario, num_samples=200, true_par
     plt.legend(loc='lower left', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
     plt.tight_layout()
-    # if IS_BAYESIAN:
-    #     filename = f'bayesian_{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}.pdf'
-    # else:
-    #     filename = f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_p{p}_seed{seed}.pdf'
-    filename = f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}.pdf'
+    estimator_type = "bayesian" if is_Bayesian else "frequentist"
+    filename = f'{snr_db}dBSNR_{FILENAME_PREFIX}_tf_posterior_CI_{scenario}_{estimator_type}.pdf'
 
     if OUTPUT_DIR:
         filename = os.path.join(OUTPUT_DIR, filename)
@@ -2182,7 +2171,7 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, M, num_steps, scenar
 
         # Plot TF vs reconstructed TF from these posterior means - just plot for last one
         if m == M-1:
-            plot_CI_and_pred_TF(best_params, snr_db, scenario, 200, true_network_params, true_param_order)
+            plot_CI_and_pred_TF(best_params, snr_db, scenario, False, 200, true_network_params, true_param_order)
 
         # 4. Compute squared errors vs true theta
         for key in selected_keys:
@@ -2601,7 +2590,7 @@ def remove_correlated_parameters(selected_params, cosine_similarity_matrix, thre
     return p_new, selected_new
 
 
-def beta_prior_fim_closed_form(alpha):
+def beta_prior_fim_closed_form(alpha, p):
     """Closed form prior FIM for Beta(α,α) priors."""
     if alpha <= 2:
         raise ValueError("alpha must be > 2 for finite FIM")
@@ -2667,28 +2656,28 @@ def key_to_tuple(key):
         return ('cable', key, None)
     
 
-def compute_real_BCRLB(snr_db, selected_keys, alpha, all_thetas, scenario):
+def compute_real_BCRLB(snr_db, selected_keys, all_thetas, scenario):
     """
-    Compute Bayesian CRLB.
+    Compute Bayesian CRLB assuming beta prior with hyperparameter alpha. 
 
     Args:
         snr_db: SNR in dB
         selected_keys: List of parameter keys to extract (in desired order)
-        alpha: Beta prior parameter
         all_thetas: Pre-generated theta samples [M, p] (same as used for RMSE)
         scenario: "no_fault" or "with_fault"
 
     Returns:
         bcrlb_dict: {param_name: BCRLB_value} in selected_keys order
     """
-
+    _, p = get_inferred_param_order()
+    print("this should be p = 3", p)
     # Compute E[I(θ)] using same theta samples as RMSE
     E_I = compute_expected_data_fim(snr_db, all_thetas, scenario)
     #print("E_I shape", E_I.shape)
     #print("E_I", E_I)
     
     # Compute J_π (prior FIM)
-    J_pi = beta_prior_fim_closed_form(alpha)
+    J_pi = beta_prior_fim_closed_form(ALPHA, p)
     # print("J_pi", J_pi)
     # print("J_pi shape", J_pi.shape)
     # Bayesian FIM
@@ -2705,7 +2694,6 @@ def compute_real_BCRLB(snr_db, selected_keys, alpha, all_thetas, scenario):
     param_order_list, _ = get_inferred_param_order()
     for key in selected_keys:
         key_tuple = key_to_tuple(key)
-        print("key_tuple", key_tuple)
         if key_tuple in param_order_list:
             idx = param_order_list.index(key_tuple)
             bcrlb_dict[key] = bcrlb_diag_full[idx].item()
@@ -2885,12 +2873,12 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices, al
             # 4. Run SVI to get estimate
             pyro.clear_param_store()
             if scenario == "with_fault":
-                losses, param_history = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, num_steps, m, M_samples)
+                _, best_params, _ = run_inference(H1_noisy, model_with_fault, guide, selected_s1, std_f, snr_db, num_steps, m, M_samples)
             else:
-                losses, param_history = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, num_steps, m, M_samples)
+                _, best_params, _ = run_inference(H1_noisy, model_no_fault, guide, selected_s1, std_f, snr_db, num_steps, m, M_samples)
 
             # 5. Extract posterior mean
-            posterior_means = extract_posterior_means(param_history)
+            posterior_means = extract_posterior_means(best_params)
 
             #Save posterior means into csv file 
             L1_svi = posterior_means["fault_position"]
@@ -2920,11 +2908,11 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices, al
             df = pd.DataFrame(rows)
 
             # Save to CSV (separate file per SNR)
-            df.to_csv(os.path.join(OUTPUT_DIR, f"svi_fault_results_{snr_db}dB.csv"), index=False)        
+            df.to_csv(os.path.join(OUTPUT_DIR, f"{snr_db}dB_svi_fault_results_{scenario}.csv"), index=False)        
 
             # Plot TF vs reconstructed TF from these posterior means
             if m == 0:
-                plot_CI_and_pred_TF(param_history, snr_db, scenario)
+                plot_CI_and_pred_TF(best_params, snr_db, scenario, True)
 
             # 6. Compute squared errors vs sampled true θ 
             for key in selected_s1:
@@ -2943,7 +2931,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices, al
 
 #Plotting stuff
 def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys, scenario, 
-                                is_bayesian=False, M=None, alpha=None, filename=None):
+                                is_bayesian=False, M=None, filename=None):
     """
     Plot RMSE vs sqrt(CRLB) across SNR for each parameter.
     
@@ -2955,7 +2943,6 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
         scenario: "with_fault" or "no_fault" (Stage 2 or Stage 1)
         is_bayesian: If True, use Bayesian labels; if False, use frequentist labels
         M: Number of Monte Carlo trials (for title)
-        alpha: Beta prior parameter (for Bayesian plots)
         filename: Output filename (if None, auto-generated)
     """
     fig, axes = plt.subplots(2, 5, figsize=(20, 8))
@@ -2966,7 +2953,7 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
         rmse_label = f'Bayesian RMSE (M={M})' if M else 'Bayesian RMSE'
         crlb_label = 'sqrt(BCRLB)'
         title_prefix = 'Bayesian RMSE vs sqrt(BCRLB)'
-        title_suffix = f'(α={alpha}, M={M} trials per SNR)' if alpha and M else ''
+        title_suffix = f'(α={ALPHA}, M={M} trials per SNR)' if ALPHA and M else ''
     else:
         rmse_label = f'RMSE (M={M})' if M else 'RMSE'
         crlb_label = 'sqrt(CRLB)'
@@ -2999,7 +2986,7 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     # Generate filename if not provided
     if filename is None:
         if is_bayesian:
-            filename = f"bayesian_brmse_vs_bcrlb_snr_sweep_alpha{alpha}_M{M}_{scenario}.pdf"
+            filename = f"bayesian_brmse_vs_bcrlb_snr_sweep_alpha{ALPHA}_M{M}_{scenario}.pdf"
         else:
             filename = f"frequentist_rmse_vs_crlb_snr_sweep_M{M}_{scenario}.pdf"
 
@@ -3016,7 +3003,6 @@ def plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_ke
     np.savez(filename.replace('.pdf', '.npz'), **plot_data)
 
     plt.savefig(filename, dpi=150, bbox_inches='tight')
-    plt.show()
     print(f"Saved: {filename}, {filename.replace('.pdf', '.npz')}")
 
 
@@ -3024,8 +3010,6 @@ def plot_nll_vs_L1_complex_mtl(snr_db):
     """
     plot fault_position vs NLL.
     """
-    print("snr db", snr_db)
-
     param_order_list, _ = get_inferred_param_order() #P = total number of network params (exluding fault)
     params_flat = get_true_param_flat()
     cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
@@ -3219,7 +3203,7 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
     posterior_means_s1 = extract_posterior_means(best_params_s1)
     plot_param_convergence(param_history_s1, posterior_means_s1, snr_db, losses_s1, sorted_keys_s1, scenario)
     update_network_params_from_posterior(posterior_means_s1)
-    plot_CI_and_pred_TF(best_params_s1, snr_db, scenario)
+    plot_CI_and_pred_TF(best_params_s1, snr_db, scenario, is_Bayesian=False)
 
     #Stage 2 - We want both frequentist and Bayesian RMSE vs sqrt(CRLB) curves for the 3 fault parameters
     #Turn ON Fault parameter inference - Cable/load inference already turned off in update_network_params
@@ -3258,36 +3242,36 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
     # Plot frequentist curves
     plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s2, scenario,
                               is_bayesian=False, M=M)
-    # uiop
-    # # ========== BAYESIAN SNR SWEEP ==========  
-    # torch.manual_seed(seed)
-    # beta_dist = torch.distributions.Beta(alpha, alpha)
-    # all_thetas = beta_dist.sample((M, 3)) #p = 3 for stage 2
-    # print(f"Generated {M} theta samples for Monte Carlo (seed={seed}) for Bayesian calculations")
-    # print("all thetas", all_thetas)
-    # #With reduced fault position range, expect no bad seeds
-    # bad_seed_indices = []
+    
+    # ========== BAYESIAN SNR SWEEP ==========  
+    torch.manual_seed(SEED)
+    beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
+    all_thetas = beta_dist.sample((M, 3)) #p = 3 for stage 2
+    print(f"Generated {M} theta samples for Monte Carlo (seed={SEED}) for Bayesian calculations")
+    print("all thetas", all_thetas)
+    #With reduced fault position range, expect no bad seeds
+    bad_seed_indices = []
 
-    # for snr_db in snr_dbs:
-    #     print(f"\n{'='*50}")
-    #     print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
-    #     print('='*50)
+    for snr_db in snr_dbs:
+        print(f"\n{'='*50}")
+        print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
+        print('='*50)
 
-    #      # Bayesian CRLB + BRMSE (using same theta samples for consistency)
-    #     bcrlb_dict = compute_real_BCRLB(snr_db, selected_s1, alpha, all_thetas)
-    #     bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s1, bad_seed_indices, all_thetas, num_steps_stage2, scenario)
-    #     print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-    #     print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+        # Bayesian CRLB + BRMSE (using same theta samples for consistency)
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s2, all_thetas, scenario)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s2, bad_seed_indices, all_thetas, num_steps_stage2, scenario)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
-    #     # Store results for plotting
-    #     for key in selected_s2:
-    #         if key in bayesian_mse and key in bcrlb_dict:
-    #             bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-    #             bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+        # Store results for plotting
+        for key in selected_s2:
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
 
-    # # Plot Bayesian curves
-    # plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s2, scenario,
-    #                           is_bayesian=True, M=M, alpha=alpha)
+    # Plot Bayesian curves
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s2, scenario,
+                              is_bayesian=True, M=M)
     
 if __name__ == '__main__':
     start_time = time.time()
@@ -3315,8 +3299,11 @@ if __name__ == '__main__':
     # Zip the output folder and remove it
     zip_filename = f"{OUTPUT_DIR}.zip"
     shutil.make_archive(OUTPUT_DIR, 'zip', OUTPUT_DIR)
-    shutil.rmtree(OUTPUT_DIR)  # Remove the folder, keep only the zip
-    print(f"\n=== All outputs zipped to: {zip_filename} ===")
+    try:
+        shutil.rmtree(OUTPUT_DIR)  # Remove the folder, keep only the zip
+        print(f"\n=== All outputs zipped to: {zip_filename} ===")
+    except PermissionError:
+        print(f"\n=== Outputs zipped to: {zip_filename} (couldn't delete folder - close File Explorer) ===")
 
 
 
