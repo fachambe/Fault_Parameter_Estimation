@@ -27,7 +27,7 @@ from pyro.infer import SVI, Trace_ELBO
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
-OUTPUT_DIR = "two_stage_results_S1=20dB_frequentist" #Name of output folder to save plots
+OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
@@ -3222,56 +3222,56 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
     # ========== FREQUENTIST SNR SWEEP ==========
     # Fault params stay fixed at their default values
 
-    for snr_db in snr_dbs:
-        print(f"\n{'='*50}")
-        print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
-        print('='*50)
-        snr_lin = 10.0 ** (snr_db / 10.0)
-        var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
-
-        crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s2, sensitivities_s2, scenario)
-        mse = calculate_mse_monte_carlo(var_f, selected_s2, snr_db, M, num_steps_stage2, scenario, params_flat, param_order_list)
-        print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
-        print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
-
-        for key in selected_s2:
-            if key in mse and key in crlb_u1u1t_dict:
-                rmse_results[key].append(math.sqrt(mse[key]))
-                crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
-                
-    # Plot frequentist curves
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s2, scenario,
-                              is_bayesian=False, M=M)
-    
-    # ========== BAYESIAN SNR SWEEP ==========  
-    # torch.manual_seed(SEED)
-    # beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
-    # all_thetas = beta_dist.sample((M, 3)) #p = 3 for stage 2
-    # print(f"Generated {M} theta samples for Monte Carlo (seed={SEED}) for Bayesian calculations")
-    # print("all thetas", all_thetas)
-    # #With reduced fault position range, expect no bad seeds
-    # bad_seed_indices = []
-
     # for snr_db in snr_dbs:
     #     print(f"\n{'='*50}")
     #     print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
     #     print('='*50)
+    #     snr_lin = 10.0 ** (snr_db / 10.0)
+    #     var_f = sigpow / snr_lin  # Compute var_f for this SNR only for frequentist
 
-    #     # Bayesian CRLB + BRMSE (using same theta samples for consistency)
-    #     bcrlb_dict = compute_real_BCRLB(snr_db, selected_s2, all_thetas, scenario)
-    #     bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s2, bad_seed_indices, all_thetas, num_steps_stage2, scenario)
-    #     print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-    #     print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+    #     crlb_u1u1t_dict = compute_real_CRLB(var_f, selected_s2, sensitivities_s2, scenario)
+    #     mse = calculate_mse_monte_carlo(var_f, selected_s2, snr_db, M, num_steps_stage2, scenario, params_flat, param_order_list)
+    #     print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse.items()})
+    #     print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_u1u1t_dict.items()})
 
-    #     # Store results for plotting
     #     for key in selected_s2:
-    #         if key in bayesian_mse and key in bcrlb_dict:
-    #             bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-    #             bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+    #         if key in mse and key in crlb_u1u1t_dict:
+    #             rmse_results[key].append(math.sqrt(mse[key]))
+    #             crlb_results[key].append(math.sqrt(crlb_u1u1t_dict[key]))  
+                
+    # # Plot frequentist curves
+    # plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_s2, scenario,
+    #                           is_bayesian=False, M=M)
+    
+    # ========== BAYESIAN SNR SWEEP ==========  
+    torch.manual_seed(SEED)
+    beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
+    all_thetas = beta_dist.sample((M, 3)) #p = 3 for stage 2
+    print(f"Generated {M} theta samples for Monte Carlo (seed={SEED}) for Bayesian calculations")
+    print("all thetas", all_thetas)
+    #With reduced fault position range, expect no bad seeds
+    bad_seed_indices = []
 
-    # # Plot Bayesian curves
-    # plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s2, scenario,
-    #                           is_bayesian=True, M=M)
+    for snr_db in snr_dbs:
+        print(f"\n{'='*50}")
+        print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
+        print('='*50)
+
+        # Bayesian CRLB + BRMSE (using same theta samples for consistency)
+        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s2, all_thetas, scenario)
+        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s2, bad_seed_indices, all_thetas, num_steps_stage2, scenario)
+        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+
+        # Store results for plotting
+        for key in selected_s2:
+            if key in bayesian_mse and key in bcrlb_dict:
+                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+
+    # Plot Bayesian curves
+    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s2, scenario,
+                              is_bayesian=True, M=M)
     
 if __name__ == '__main__':
     start_time = time.time()
