@@ -27,7 +27,7 @@ from pyro.infer import SVI, Trace_ELBO
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
-OUTPUT_DIR = "two_stage_results_S1=10dB" #Name of output folder to save plots
+OUTPUT_DIR = "two_stage_results_S1=20dB_frequentist" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
@@ -3185,7 +3185,7 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params) #[F]
     sigpow = torch.mean(torch.abs(H_clean)**2)
 
-    snr_db = 10
+    snr_db = 20
     print(f"\n{'='*50}")
     print(f"SNR = {snr_db} dB for Stage 1 Network Parameter Calibration")
     print('='*50)
@@ -3244,34 +3244,34 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
                               is_bayesian=False, M=M)
     
     # ========== BAYESIAN SNR SWEEP ==========  
-    torch.manual_seed(SEED)
-    beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
-    all_thetas = beta_dist.sample((M, 3)) #p = 3 for stage 2
-    print(f"Generated {M} theta samples for Monte Carlo (seed={SEED}) for Bayesian calculations")
-    print("all thetas", all_thetas)
-    #With reduced fault position range, expect no bad seeds
-    bad_seed_indices = []
+    # torch.manual_seed(SEED)
+    # beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
+    # all_thetas = beta_dist.sample((M, 3)) #p = 3 for stage 2
+    # print(f"Generated {M} theta samples for Monte Carlo (seed={SEED}) for Bayesian calculations")
+    # print("all thetas", all_thetas)
+    # #With reduced fault position range, expect no bad seeds
+    # bad_seed_indices = []
 
-    for snr_db in snr_dbs:
-        print(f"\n{'='*50}")
-        print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
-        print('='*50)
+    # for snr_db in snr_dbs:
+    #     print(f"\n{'='*50}")
+    #     print(f"SNR = {snr_db} dB for Stage 2 Fault Parameter Estimation")
+    #     print('='*50)
 
-        # Bayesian CRLB + BRMSE (using same theta samples for consistency)
-        bcrlb_dict = compute_real_BCRLB(snr_db, selected_s2, all_thetas, scenario)
-        bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s2, bad_seed_indices, all_thetas, num_steps_stage2, scenario)
-        print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
-        print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+    #     # Bayesian CRLB + BRMSE (using same theta samples for consistency)
+    #     bcrlb_dict = compute_real_BCRLB(snr_db, selected_s2, all_thetas, scenario)
+    #     bayesian_mse = calculate_bayesian_mse_monte_carlo(snr_db, selected_s2, bad_seed_indices, all_thetas, num_steps_stage2, scenario)
+    #     print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse.items()})
+    #     print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
 
-        # Store results for plotting
-        for key in selected_s2:
-            if key in bayesian_mse and key in bcrlb_dict:
-                bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
-                bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
+    #     # Store results for plotting
+    #     for key in selected_s2:
+    #         if key in bayesian_mse and key in bcrlb_dict:
+    #             bayesian_rmse_results[key].append(math.sqrt(bayesian_mse[key]))
+    #             bayesian_crlb_results[key].append(math.sqrt(bcrlb_dict[key]))  
 
-    # Plot Bayesian curves
-    plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s2, scenario,
-                              is_bayesian=True, M=M)
+    # # Plot Bayesian curves
+    # plot_rmse_vs_crlb_snr_sweep(snr_dbs, bayesian_rmse_results, bayesian_crlb_results, selected_s2, scenario,
+    #                           is_bayesian=True, M=M)
     
 if __name__ == '__main__':
     start_time = time.time()
