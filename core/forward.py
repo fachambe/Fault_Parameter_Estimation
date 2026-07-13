@@ -1,10 +1,10 @@
 import torch
 import numpy as np
 class ForwardModel:
-    def __init__(self, gamma, Zc, L=1000.0, device=None):
+    def __init__(self, gamma, Zc, L, Zs, device=None):
         self.gamma = gamma
         self.Zc = Zc
-        self.Zs = 5.0
+        self.Zs = Zs
         self.L = L
         self.device = device
 
@@ -22,7 +22,7 @@ class ForwardModel:
         dev = self.gamma.device
         F = self.gamma.numel()
 
-        # Convert tensor scalars to 1-D
+        # Convert scalars to 1-D
         if L1.dim() == 0: L1 = L1.unsqueeze(0)
         if ZF.dim() == 0: ZF = ZF.unsqueeze(0)
         if ZL.dim() == 0: ZL = ZL.unsqueeze(0)
@@ -42,9 +42,6 @@ class ForwardModel:
             ZL  = ZL.to(device=dev, dtype=torch.cfloat) #[N]
 
         gamma = self.gamma.unsqueeze(0)  # [1, F]
-        # alpha_orig = gamma.real
-        # beta_orig = gamma.real
-        # gamma = alpha_orig + 1j * (0.1 * beta_orig)
         Zc    = self.Zc.unsqueeze(0)     # [1, F]
         L     = self.L
 

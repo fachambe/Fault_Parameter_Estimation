@@ -9,7 +9,7 @@ from core.forward import ForwardModel
 from core.likelihoods import ComplexGaussianLik, RiceanLikelihood, WrappedPhaseGaussianLikelihood
 from estimators.mle_gridsearch import GridSearchMLE
 from estimators.elbo import ELBOArgmaxMu1D
-from estimators.mle_optimized import ContinuousMLE
+from estimators.L1_profile import ContinuousMLE
 from data.manager import DatasetManager
 from torch.func import vmap, jacrev, jacfwd
 from core.crlb import complex_partials_fullbatch, fim_from_complex_jac, get_CRLB, crlb_L1_only_batch, debug_jacobian_mags, crlb_for_target_estimate
@@ -33,7 +33,7 @@ def plot_rmse_vs_restarts_40db(
     restarts_list=(1, 5, 10, 20, 30, 50),
     adam_steps=400,
     adam_lr=1e-3,
-    lbfgs_steps=150,
+    bfgs_steps=150,
 ):
     """
     Fix SNR=40 dB. For each S in restarts_list:
@@ -79,8 +79,8 @@ def plot_rmse_vs_restarts_40db(
             n_starts=int(S),
             adam_steps=int(adam_steps),
             adam_lr=float(adam_lr),
-            use_lbfgs=True,
-            lbfgs_steps=int(lbfgs_steps),
+            use_bfgs=True,
+            bfgs_steps=int(bfgs_steps),
             verbose=True,                # keep output clean
         )
 
@@ -565,15 +565,15 @@ def main(cfg_path="configs/benchmark.yaml"):
     n_starts=10,
     adam_steps=400,
     adam_lr=1e-3,
-    use_lbfgs=True,
-    lbfgs_steps=100,
+    use_bfgs=True,
+    bfgs_steps=100,
     # profiling knobs
     profile_L1=True,
     L1_grid_points=500,   
     inner_steps=12,       
     inner_lr=1e-2,
-    inner_use_lbfgs=False,
-    inner_lbfgs_steps=8,
+    inner_use_bfgs=False,
+    inner_bfgs_steps=8,
     profile_topk=3        # keep the 3 best L1 wells as joint seeds
 )   
   

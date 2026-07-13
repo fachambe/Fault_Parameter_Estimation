@@ -84,9 +84,8 @@ def plot_CI_and_pred_TF(tf_mean, tf_lower, tf_upper, H_clean_db, freq_range_mhz)
 
 
 if __name__ == '__main__':
-
     #For rmse_vs_crlb_snr_sweep plot
-    rmse_crlb_npz_file = "frequentist_p3_M1_seed95/rmse_vs_crlb_snr_sweep_M1_p3_seed95.npz"  # Update this path
+    rmse_crlb_npz_file = "frequentist_p3_M25_seed95/rmse_vs_crlb_snr_sweep_M25_p3_seed95.npz"  # Update this path
 
     if os.path.exists(rmse_crlb_npz_file):
         # Load data
@@ -111,7 +110,7 @@ if __name__ == '__main__':
         plot_rmse_vs_crlb_snr_sweep(snr_dbs, rmse_results, crlb_results, selected_keys)
     
     # For plot_CI_and_pred_TF 
-    tf_npz_file = "frequentist_p3_M1_seed95/40dBSNR_149khz-10mhz_Adam_lr0.02_tf_posterior_CI_with_fault_p3_seed95.npz"  # Update this path
+    tf_npz_file = "frequentist_p3_M25_seed95/40dBSNR_149khz-10mhz_Adam_lr0.02_tf_posterior_CI_with_fault_p3_seed95.npz"  # Update this path
 
     if os.path.exists(tf_npz_file):
         # Load data

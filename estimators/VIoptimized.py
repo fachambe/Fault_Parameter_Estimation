@@ -9,7 +9,7 @@ from pyro.distributions import Delta
 from torch.distributions import constraints, SigmoidTransform, TanhTransform, AffineTransform
 import pyro.distributions as dist
 import matplotlib.pyplot as plt
-from estimators.mle_optimized import OptimizedMLE
+from estimators.L1_profile import OptimizedMLE
 import numpy as np
 
 
@@ -51,30 +51,28 @@ class VIoptimized(Estimator):
 
     Args
     ----
-    fm: ForwardModel                (provides compute_H_complex(L1, ZF, ZL))
+    fm: ForwardModel                (provides compute_H_complex(L1, ZF, ZL) and L)
     likelihood:                     ComplexGaussianLik()
-    L: float                        line length (upper bound for L1)
     device: torch.device
     n_starts: int                   number of random restarts per observation
     adam_steps: int
     adam_lr: float
-    use_lbfgs: bool
-    lbfgs_steps: int
+    use_bfgs: bool
+    bfgs_steps: int
     verbose: bool
     """
     def __init__(self,
                  fm,
                  likelihood,
-                 L: float = 1000.0,
                  device="cuda",
                  # VI parameters
                  svi_steps: int = 3000,
-                 svi_lr: float = 1e-2, 
+                 svi_lr: float = 1e-2,
                  second_stage_num_particles: int = 5, # of Monte Carlo samples for ELBO in second stage full SVI optimization
                  # mu_L1 Profile grid search parameters
                  L1_grid: torch.tensor = torch.linspace(100, 900, 400),
                  first_stage_num_particles: int = 100, # of Monte Carlo samples for each mu in mu_grid of size [G] from variational distribution q
-                 fixed_sigma: float = 0.01, 
+                 fixed_sigma: float = 0.01,
                  topK: int = 3, # Top K mus
                  inner_steps: int = 100,  #Inner SVI steps at each grid point
                  inner_lr: float = 1e-2 #Inner SVI LR
@@ -82,7 +80,7 @@ class VIoptimized(Estimator):
         self.fm = fm
         self.device = device
         self.lik = likelihood
-        self.L = float(L)
+        self.L = float(fm.L)
         #VI
         self.svi_steps = svi_steps
         self.svi_lr = svi_lr

@@ -44,21 +44,19 @@ class VI(Estimator):
 
     Args
     ----
-    fm: ForwardModel                (provides compute_H_complex(L1, ZF, ZL))
+    fm: ForwardModel                (provides compute_H_complex(L1, ZF, ZL) and L)
     likelihood:                     ComplexGaussianLik()
-    L: float                        line length (upper bound for L1)
     device: torch.device
     n_starts: int                   number of random restarts per observation
     adam_steps: int
     adam_lr: float
-    use_lbfgs: bool
-    lbfgs_steps: int
+    use_bfgs: bool
+    bfgs_steps: int
     verbose: bool
     """
     def __init__(self,
                  fm,
                  likelihood,
-                 L: float = 1000.0,
                  device="cuda",
                  # VI hyperparams
                  svi_steps: int = 1000,
@@ -67,7 +65,7 @@ class VI(Estimator):
         self.fm = fm
         self.device = device
         self.lik = likelihood
-        self.L = float(L)
+        self.L = float(fm.L)
 
         #VI
         self.svi_steps = svi_steps

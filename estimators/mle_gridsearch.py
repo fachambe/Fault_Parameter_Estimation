@@ -1,98 +1,56 @@
-# estimators/mle.py
+# estimators/mle_gridsearch.py
 import torch
 from estimators.base import Estimator
 
 class GridSearchMLE(Estimator):
-    def __init__(self, fm, likelihood, grid,
-                 target, fixed, device,
-                 cand_batch=4096, obs_batch=64, estimate=None):
+    def __init__(self, fm, likelihood, grid, target, fixed, device):
         """
-        target: "L1" | "ZF" | "ZL"
-        fixed: dict of fixed params, e.g. {"ZF": 1000-5j, "ZL": 100-5j, "L1": 500.0}
-        grid:  [K] candidates (float for L1, complex for ZF/ZL)
-               - float for L1
-               - float for Re/Im when estimate="real"/"imag" for ZF/ZL
-               - complex if estimate is None for ZF/ZL 
-        estimate: None | "real" | "imag"
-            - For ZF/ZL: choose which component to estimate. Other component held fixed.
+        grid:  [K] float candidates for the target parameter
         """
-        self.fm, self.lik = fm, likelihood 
-        self.target = target
-        self.fixed = fixed
-        self.device = device
+        super().__init__(fm, likelihood, target, fixed, device=device)
         self.grid = grid
-        self.cand_batch_size = int(cand_batch) #[c] 
-        self.obs_batch_size  = int(obs_batch) #[n] N = 1000 per SNR usually
-        self.estimate = estimate  # None/"real"/"imag"
-
-        fx = {k: (complex(fixed[k]["re"], fixed[k]["im"]) if isinstance(fixed[k], dict) else fixed[k])
-              for k in fixed}
-        self.L1_fix = torch.as_tensor(fx["L1"], device=self.device, dtype=torch.float32)
-        self.ZF_fix = torch.as_tensor(fx["ZF"], device=self.device, dtype=torch.cfloat)
-        self.ZL_fix = torch.as_tensor(fx["ZL"], device=self.device, dtype=torch.cfloat)
 
     @torch.no_grad()
     def predict(self, obs_tf, noise_var):
         """
-        obs_tf:      [N,F] complex64 tensor
-        noise_var: [N,F] float32 tensor
-         Returns:     numpy array of estimates for parameter [N]
-            - float32 for L1 and component-only ZF/ZL
-            - complex64 for full ZF/ZL
+        obs_tf:    [N, F] complex64 tensor
+        noise_var: [N, 1] or [N, F] float32 tensor
+        Returns:   dict with key=target, value=numpy array [N] of estimates
         """
-
-        N, F = obs_tf.shape
         K = self.grid.numel()
-        device = self.device
 
-        best_ll  = torch.full((N,), -float("inf"), device=device)
-        best_idx = torch.zeros(N, dtype=torch.long, device=device)
+        # Build parameter arrays [K] for all candidates
+        if self.target == "L1":
+            L1 = self.grid.to(dtype=torch.float32, device=self.device)
+            ZF = self.ZF_fix.expand(K)
+            ZL = self.ZL_fix.expand(K)
+        elif self.target == "ZF_re":
+            L1 = self.L1_fix.expand(K)
+            ZF = torch.complex(self.grid, self.ZF_fix.imag.expand(K).to(torch.float32))
+            ZL = self.ZL_fix.expand(K)
+        elif self.target == "ZF_im":
+            L1 = self.L1_fix.expand(K)
+            ZF = torch.complex(self.ZF_fix.real.expand(K).to(torch.float32), self.grid)
+            ZL = self.ZL_fix.expand(K)
+        elif self.target == "ZL_re":
+            L1 = self.L1_fix.expand(K)
+            ZF = self.ZF_fix.expand(K)
+            ZL = torch.complex(self.grid, self.ZL_fix.imag.expand(K).to(torch.float32))
+        elif self.target == "ZL_im":
+            L1 = self.L1_fix.expand(K)
+            ZF = self.ZF_fix.expand(K)
+            ZL = torch.complex(self.ZL_fix.real.expand(K).to(torch.float32), self.grid)
+        else:
+            raise ValueError(f"Unknown target: {self.target}")
 
-        for s in range(0, K, self.cand_batch_size):
+        # Forward model: H[K, F]
+        H = self.fm.compute_H_complex(L1=L1, ZF=ZF, ZL=ZL)
 
-            cand = self.grid[s:s+self.cand_batch_size]         # [c]
-            c = cand.numel()           # [c]
+        # NLL matrix: [K, N]
+        nll_KN = self.lik.nll_matrix(obs_tf, H, noise_var)
 
-            # Build parameter triplets [c] for this batch
-            if self.target == "L1":
-                L1 = cand.to(dtype=torch.float32, device=device)
-                ZF = self.ZF_fix.expand(c) 
-                ZL = self.ZL_fix.expand(c)
-            elif self.target == "ZF":
-                L1 = self.L1_fix.expand(c)
-                if self.estimate == "real":
-                    ZF = torch.complex(cand, self.ZF_fix.imag.expand(c).to(torch.float32))
-                elif self.estimate == "imag":
-                    ZF = torch.complex(self.ZF_fix.real.expand(c).to(torch.float32), cand)
-                else:  # full complex
-                    ZF = cand.to(dtype=torch.cfloat, device=device)
-                ZL = self.ZL_fix.expand(c)
-            else: #ZL
-                L1 = self.L1_fix.expand(c)
-                ZF = self.ZF_fix.expand(c)
-                if self.estimate == "real":
-                    ZL = torch.complex(cand, self.ZL_fix.imag.expand(c).to(torch.float32))
-                elif self.estimate == "imag":
-                    ZL = torch.complex(self.ZL_fix.real.expand(c).to(torch.float32), cand)
-                else:  # full complex
-                    ZL = cand.to(dtype=torch.cfloat, device=device)
-            
-            # Forward: H[c,F]
-            H = self.fm.compute_H_complex(L1=L1, ZF=ZF, ZL=ZL)  # [c,F] cfloat
-            for t in range(0, N, self.obs_batch_size):
-                obs_batch = obs_tf[t:t+self.obs_batch_size] #[n,F] take first n observations from N observations per SNR
-                var_batch = noise_var[t:t+self.obs_batch_size] #[n, F]
-                ll_c_n = self.lik.score_matrix(obs_batch, H, var_batch) #scores per (candidate, obs) -> [c, n]
-                # best candidate per obs in this chunk
-                ll_max, idx_local = ll_c_n.max(dim=0)        # [n]
-                # update global bests
-                cur = slice(t, t+obs_batch.shape[0])
-                take = ll_max > best_ll[cur] #update n with these c 
-                best_ll[cur]  = torch.where(take, ll_max, best_ll[cur]) #Updates the running best scores only where take is True
-                best_idx[cur] = torch.where(take, s + idx_local, best_idx[cur]) #Update the running best indices only where take is True
-        
+        # Best candidate per observation (lowest NLL)
+        best_idx = nll_KN.argmin(dim=0)  # [N]
+        best_vals = self.grid[best_idx].detach().cpu().numpy()
 
-        return {
-            "L1": self.grid[best_idx].detach().cpu().numpy(), # [N] best candidates from grid for all N observations
-        }
-        
+        return {self.target: best_vals}

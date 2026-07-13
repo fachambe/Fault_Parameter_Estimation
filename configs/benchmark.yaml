@@ -1,24 +1,21 @@
 # configs/benchmark.yaml
 device: "cuda"
-dataset_id: "fixed_v1_2-10MHz_F500"   # include range + F to avoid mixups
 seed: 5692
-force: True #Force to regenerate dataset
-plot_loglikelihood: False #Plot log-likelihood with respect to parameter of interest at each SNR
-
 snr_dbs: [40]
-
-test_per_snr: 1
-train_per_snr: 5000
-
+#snr_dbs: [0,5,10,15,20,25,30,35,40]
+N: 100 #Number of observations of CTF
+L: 1000 #Length of cable for simple model
+Zs: 50 #Source impedance = 50 ohms
 freq:
-  start_hz: 2000000        # 2e6
-  stop_hz: 10000000       # 10e6
-  num_points: 500
+  #start_hz: 150000        # 150khz
+  #stop_hz: 500000         # 500khz
+  start_hz: 2000000      # 2e6
+  stop_hz: 10000000      # 10e6
+  num_points: 200
 
-target: "ALL3SP" #L1, ZF, ZL, ALL3sameparams (ALL3SP), ALL3diffparams (ALL3DP)
-#ALL3SP means that the same triplet (ZF, ZL, L1) are used to generate all observations. Only difference is the Gaussian noise added to each.
-#ALL3DP means that different triplets (ZF, ZL, L1) are used to generate all observations. Gaussian noise is still added to each. 
-estimate: None #"real", "imag", or None. Only applies to 1D case. 
+target: "ALL3SP" #ALL3sameparams (ALL3SP), ALL3diffparams (ALL3DP)
+#ALL3SP means that the same triplet (ZF, ZL, L1) are used to generate all observations. Only difference is the Gaussian noise added to each. (Frequentist)
+#ALL3DP means that different triplets (ZF, ZL, L1) are used to generate all observations. Gaussian noise is still added to each. (Bayesian) 
 
 fixed: 
   L1: 250.0
@@ -27,14 +24,14 @@ fixed:
 
 #Parameter Ranges
 true_range:
-  L1: {min: 1.0, max: 1000.0}             
+  L1: {min: 1.0, max: 999.0}  #should always be L - 1 for max        
   ZF:
-    re: {min: 1.0,  max: 4000.0}
-    im: {min: -100.0,   max: 100.0}
+    re: {min: 1.0, max: 4000.0}
+    im: {min: -100.0, max: 100.0}
   ZL:
-    re: {min: 1.0,   max: 200.0}
-    im: {min: -100.0,  max: 100.0}
-
+    re: {min: 1.0, max: 400.0}
+    im: {min: -100.0, max: 100.0}
+    
 # USED ONLY FOR 1D MLE grid search and ELBO-argmax μ grid search
 grid:
   L1: {min: 1.0, max: 1000.0, num: 1000}

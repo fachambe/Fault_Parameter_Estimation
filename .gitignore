@@ -1,13 +1,25 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+env/
 
 # Data files
 *.npz
 *.mat
 
-# Plots / figures
+# Figures
 figures/
 
-# VS Code
+# IDEs
 .vscode/
+.idea/
 
+# Claude
+.claude/settings.local.json
+
+# Archives
+*.zip

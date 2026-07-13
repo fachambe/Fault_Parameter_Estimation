@@ -83,45 +83,6 @@ def complex_partials_fullbatch(fm, test, device):
 
 
 @torch.no_grad()
-def debug_jacobian_mags(fm, test, device):
-    """Print summary stats of |∂u/∂ZF_re|, |∂u/∂ZF_im|, |∂u/∂L1|."""
-    ZF_re = torch.tensor(test["ZF_true_re"], device=device, dtype=torch.float32)
-    ZF_im = torch.tensor(test["ZF_true_im"], device=device, dtype=torch.float32)
-    ZL_re = torch.tensor(test["ZL_true_re"], device=device, dtype=torch.float32)
-    ZL_im = torch.tensor(test["ZL_true_im"], device=device, dtype=torch.float32)
-    L1    = torch.tensor(test["L1_true"],    device=device, dtype=torch.float32)
-
-    dri_ZF_re, dri_ZF_im, _, _, d_ri_L1 = vmap(
-        jac_fwd_single, in_dims=(None, 0, 0, 0, 0, 0)
-    )(fm, ZF_re, ZF_im, ZL_re, ZL_im, L1)  # each [N,F,2]
-    #print("dri_ZF_re", dri_ZF_re)
-    #print("dri_ZF_im", dri_ZF_im)
-    #print("d_ri_L1", d_ri_L1)
-    def to_c(dri): return dri[...,0] + 1j*dri[...,1]  # [N,F] complex
-    g_zfr = to_c(dri_ZF_re)
-    g_zfi = to_c(dri_ZF_im)
-    g_L1  = to_c(d_ri_L1)
-
-    # norms per sample (sum over F)
-    n_zfr = (g_zfr.abs()**2).sum(dim=1).sqrt()
-    n_zfi = (g_zfi.abs()**2).sum(dim=1).sqrt()
-    n_L1  = (g_L1.abs()**2).sum(dim=1).sqrt()
-
-    print("[∥∂u/∂ZF_re∥_2]_mean =", n_zfr.mean().item(),
-          " median =", n_zfr.median().item())
-    print("[∥∂u/∂ZF_im∥_2]_mean =", n_zfi.mean().item(),
-          " median =", n_zfi.median().item())
-    print("[∥∂u/∂L1∥_2]_mean   =", n_L1.mean().item(),
-          " median =", n_L1.median().item(), flush=True)
-
-    # optional: relative sensitivity (scale by parameter magnitude)
-    ZF = torch.complex(ZF_re, ZF_im)
-    rel_zf = ( (g_zfr.abs()**2 + g_zfi.abs()**2).sum(dim=1).sqrt() /
-               (fm.compute_H_complex(L1=L1, ZF=ZF, ZL=torch.complex(ZL_re, ZL_im)).abs()**2).sum(dim=1).sqrt().clamp_min(1e-12) )
-    print("[relative sensitivity ZF]_mean =", rel_zf.mean().item())
-
-
-@torch.no_grad()
 def fim_from_complex_jac(du_aug, var_NF):
     """
     Build the per-sample augmented complex FIM from Wirtinger Jacobians.
@@ -133,8 +94,8 @@ def fim_from_complex_jac(du_aug, var_NF):
             [ ∂u/∂ZF , ∂u/∂ZL , ∂u/∂ZF* , ∂u/∂ZL* , ∂u/∂L1 ].
         (ZF, ZL are complex parameters; L1 is a real parameter.)
 
-    var_NF : [N, F] or [F] real
-        Noise variance σ² per (sample, frequency). Will broadcast to [N, F].
+    var_NF : [N, F] or [N, 1] real
+        Noise variance
 
     Returns
     -------
@@ -233,7 +194,7 @@ def get_CRLB(FIM_total):
     crlb_ZL = diag_c[..., 1]                                   # [N,]
 
 
-    return crlb_L1, crlb_ZF, crlb_ZL
+    return crlb_L1.real, crlb_ZF, crlb_ZL
 
 
 @torch.no_grad()
@@ -283,62 +244,131 @@ def crlb_L1_only_batch(fm, test, var_NF, eps=1e-12):
     return FI_L1, CRLB_L1
 
 
+def crlb_for_1_real_param(fm, target, fixed, var_f, device):
+    """
+    Compute CRLB for a single real parameter using wrapper + jacfwd approach.
+
+    Uses the formula: I(θ) = (2/σ²) Σ_f |∂H(f;θ)/∂θ|²
+
+    Args:
+        fm: Forward model with compute_H_complex method
+        target: "L1" | "ZF_re" | "ZF_im" | "ZL_re" | "ZL_im"
+        fixed: Dict with true parameter values to evaluate at, e.g.:
+               {"L1": 250.0, "ZF": {"re": 100.0, "im": -50.0}, "ZL": {"re": 100.0, "im": -5.0}}
+        var_f: Noise variance - scalar or [F] tensor
+        device: torch device
+
+    Returns:
+        FI: scalar tensor - Fisher Information
+        CRLB: scalar tensor - Cramer-Rao Lower Bound
+    """
+    # Get fixed values as tensors
+    L1_fixed = torch.tensor(fixed["L1"], device=device, dtype=torch.float32)
+    ZF_re_fixed = torch.tensor(fixed["ZF"]["re"], device=device, dtype=torch.float32)
+    ZF_im_fixed = torch.tensor(fixed["ZF"]["im"], device=device, dtype=torch.float32)
+    ZL_re_fixed = torch.tensor(fixed["ZL"]["re"], device=device, dtype=torch.float32)
+    ZL_im_fixed = torch.tensor(fixed["ZL"]["im"], device=device, dtype=torch.float32)
+
+    # Create wrapper that takes single real param and returns H as [F, 2] real
+    if target == "L1":
+        true_val = L1_fixed
+        def wrapper(theta):
+            ZF = torch.complex(ZF_re_fixed, ZF_im_fixed)
+            ZL = torch.complex(ZL_re_fixed, ZL_im_fixed)
+            H = fm.compute_H_complex(theta.unsqueeze(0), ZF.unsqueeze(0), ZL.unsqueeze(0))[0]  # [F]
+            return torch.stack([H.real, H.imag], dim=-1)  # [F, 2]
+    elif target == "ZF_re":
+        true_val = ZF_re_fixed
+        def wrapper(theta):
+            ZF = torch.complex(theta, ZF_im_fixed)
+            ZL = torch.complex(ZL_re_fixed, ZL_im_fixed)
+            H = fm.compute_H_complex(L1_fixed.unsqueeze(0), ZF.unsqueeze(0), ZL.unsqueeze(0))[0]
+            return torch.stack([H.real, H.imag], dim=-1)
+    elif target == "ZF_im":
+        true_val = ZF_im_fixed
+        def wrapper(theta):
+            ZF = torch.complex(ZF_re_fixed, theta)
+            ZL = torch.complex(ZL_re_fixed, ZL_im_fixed)
+            H = fm.compute_H_complex(L1_fixed.unsqueeze(0), ZF.unsqueeze(0), ZL.unsqueeze(0))[0]
+            return torch.stack([H.real, H.imag], dim=-1)
+    elif target == "ZL_re":
+        true_val = ZL_re_fixed
+        def wrapper(theta):
+            ZF = torch.complex(ZF_re_fixed, ZF_im_fixed)
+            ZL = torch.complex(theta, ZL_im_fixed)
+            H = fm.compute_H_complex(L1_fixed.unsqueeze(0), ZF.unsqueeze(0), ZL.unsqueeze(0))[0]
+            return torch.stack([H.real, H.imag], dim=-1)
+    elif target == "ZL_im":
+        true_val = ZL_im_fixed
+        def wrapper(theta):
+            ZF = torch.complex(ZF_re_fixed, ZF_im_fixed)
+            ZL = torch.complex(ZL_re_fixed, theta)
+            H = fm.compute_H_complex(L1_fixed.unsqueeze(0), ZF.unsqueeze(0), ZL.unsqueeze(0))[0]
+            return torch.stack([H.real, H.imag], dim=-1)
+    else:
+        raise ValueError(f"Unknown target: {target}. Use L1, ZF_re, ZF_im, ZL_re, or ZL_im")
+
+    # Compute Jacobian at true value: wrapper: [] -> [F, 2], so J: [F, 2]
+    J = jacfwd(wrapper)(true_val)  # [F, 2]
+
+    # Reconstruct complex Jacobian: ∂H/∂θ = ∂H_re/∂θ + j * ∂H_im/∂θ
+    dH = J[:, 0] + 1j * J[:, 1]  # [F] complex
+
+    # FI = (2/σ²) Σ_f |∂H/∂θ|²
+    if var_f.ndim == 0:
+        var = var_f
+    else:
+        var = var_f  # [F]
+
+    FI = (2.0 * (dH.conj() * dH).real / var).sum()
+    CRLB = 1.0 / FI
+
+    return FI, CRLB
 
 
 @torch.no_grad()
 def crlb_for_target_estimate(du_aug: torch.Tensor,
                              var_NF: torch.Tensor,
-                             target: str,
-                             estimate=None) -> torch.Tensor:
+                             target: str) -> torch.Tensor:
     """
     Returns per-sample CRLB [N] for the requested parameterization.
 
     du_aug : [N,F,5] complex with columns
              [∂u/∂ZF, ∂u/∂ZL, ∂u/∂ZF*, ∂u/∂ZL*, ∂u/∂L1]
     var_NF : [N,F] or [F] real
-    target : "L1" | "ZF" | "ZL"
-    estimate : None | "real" | "imag" |
-        - L1: ignored (always scalar real)
-        - ZF/ZL + "real":  CRLB(Re)  = 1 / I11
-        - ZF/ZL + "imag":  CRLB(Im)  = 1 / I22
-        - ZF/ZL + None:    complex MSE CRLB = trace(inv(I2)) = (I11+I22)/(I11*I22 - I12^2)
+    target : "L1" | "ZF_re" | "ZF_im" | "ZL_re" | "ZL_im"
     """
-    t = str(target).upper()
-    e = None if estimate is None else str(estimate).lower()
     # Broadcast var to [N,F]
     if var_NF.ndim == 1:
         var = var_NF.unsqueeze(0).expand(du_aug.shape[0], -1)
     else:
         var = var_NF
-    
+
     # L1: FI = Σ_f 2|∂u/∂L1|^2 / σ^2
-    if t == "L1":
+    if target == "L1":
         du_L1 = du_aug[..., 4]
         FI = (2.0 * (du_L1.conj() * du_L1).real / var).sum(dim=1)
         return 1.0 / FI  # [N]
-    
-    # Choose the right Wirtinger columns
-    if t == "ZF":
+
+    # Choose the right Wirtinger columns based on target
+    if target.startswith("ZF"):
         du, duc = du_aug[..., 0], du_aug[..., 2]  # ∂u/∂ZF, ∂u/∂ZF*
-    elif t == "ZL":
+    elif target.startswith("ZL"):
         du, duc = du_aug[..., 1], du_aug[..., 3]  # ∂u/∂ZL, ∂u/∂ZL*
     else:
         raise ValueError(f"Unknown target: {target}")
-    
+
     # Real-parameter gradients for (z_r, z_i)
-    dzr = du + duc            # ∂u/∂z_r 
-    dzi = -1j*du + 1j*duc     # ∂u/∂z_i 
+    dzr = du + duc            # ∂u/∂z_r
+    dzi = -1j*du + 1j*duc     # ∂u/∂z_i
 
     w   = 2.0 / var
     I11 = (w * (dzr.conj()*dzr).real).sum(dim=1)  # [N]
     I22 = (w * (dzi.conj()*dzi).real).sum(dim=1)  # [N]
-    I12 = (w * (dzr.conj()*dzi).real).sum(dim=1)                 # [N]
 
-    if e == "real":
+    if target.endswith("_re"):
         return 1.0 / I11
-    if e == "imag":
+    elif target.endswith("_im"):
         return 1.0 / I22
-
-    # Full complex param: CRLB for complex MSE = trace(inv(I2))
-    det = (I11*I22 - I12**2)
-    return (I11 + I22) / det    # [N]
+    else:
+        raise ValueError(f"Unknown target: {target}")
