@@ -1,9 +1,9 @@
 # configs/benchmark.yaml
 device: "cuda"
 seed: 5692
-snr_dbs: [40]
-#snr_dbs: [0,5,10,15,20,25,30,35,40]
-N: 100 #Number of observations of CTF
+#snr_dbs: [40]
+snr_dbs: [0,5,10,15,20,25,30,35,40]
+N: 2500 #Number of observations of CTF
 L: 1000 #Length of cable for simple model
 Zs: 50 #Source impedance = 50 ohms
 freq:

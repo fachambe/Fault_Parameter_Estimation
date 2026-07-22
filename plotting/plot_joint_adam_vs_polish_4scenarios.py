@@ -1,9 +1,9 @@
-# plotting/plot_joint_gradient_comparison.py
+# plotting/plot_joint_adam_vs_polish_4scenarios.py
 """
-Plot results from joint_gradient_comparison.py:
+Plot results from run_joint_adam_vs_polish_4scenarios.py:
 - 3 separate 2x2 figures (one per parameter: L1, ZF, ZL)
 - Each 2x2 shows RMSE vs sqrt(CRLB) across the 4 scenarios
-- Compares 3 estimators: Adam only, Adam+Newton, Adam+LM
+- Compares 4 estimators: Adam only, Adam+Newton, Adam+LM, Adam+BFGS
 """
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -50,6 +50,10 @@ def load_results(results_path):
             "rmse_L1_lm": data[f"{key}_rmse_L1_lm"],
             "rmse_ZF_lm": data[f"{key}_rmse_ZF_lm"],
             "rmse_ZL_lm": data[f"{key}_rmse_ZL_lm"],
+            # Adam + BFGS
+            "rmse_L1_bfgs": data[f"{key}_rmse_L1_bfgs"],
+            "rmse_ZF_bfgs": data[f"{key}_rmse_ZF_bfgs"],
+            "rmse_ZL_bfgs": data[f"{key}_rmse_ZL_bfgs"],
             # CRLB
             "crlb_L1": data[f"{key}_crlb_L1"],
             "crlb_ZF": data[f"{key}_crlb_ZF"],
@@ -64,7 +68,7 @@ def load_results(results_path):
 def plot_parameter_comparison(results, param, unit, save_path):
     """
     Create 2x2 figure showing RMSE vs sqrt(CRLB) for one parameter across 4 scenarios.
-    Compares 3 estimators: Adam only, Adam+Newton, Adam+LM.
+    Compares 4 estimators: Adam only, Adam+Newton, Adam+LM, Adam+BFGS.
 
     Args:
         results: loaded results dict
@@ -120,6 +124,7 @@ def plot_parameter_comparison(results, param, unit, save_path):
             rmse_adam = data[f"rmse_{param}_adam"]
             rmse_newton = data[f"rmse_{param}_newton"]
             rmse_lm = data[f"rmse_{param}_lm"]
+            rmse_bfgs = data[f"rmse_{param}_bfgs"]
             crlb = data[f"crlb_{param}"]
 
             # Plot Adam only
@@ -141,6 +146,13 @@ def plot_parameter_comparison(results, param, unit, save_path):
                 snrs, rmse_lm,
                 marker="^", markersize=8, linewidth=2,
                 color="red", label="Adam+LM",
+            )
+
+            # Plot Adam + BFGS
+            ax.plot(
+                snrs, rmse_bfgs,
+                marker="d", markersize=8, linewidth=2,
+                color="purple", label="Adam+BFGS",
             )
 
             # Plot sqrt(CRLB)
@@ -166,7 +178,7 @@ def plot_parameter_comparison(results, param, unit, save_path):
     print(f"Saved {save_path}")
 
 
-def main(results_path=None, save_dir="figures/joint_gradient_comparison_figures"):
+def main(results_path=None, save_dir="figures/joint_adam_vs_polish_4scenarios_figures"):
     """
     Main plotting function.
 
@@ -176,10 +188,10 @@ def main(results_path=None, save_dir="figures/joint_gradient_comparison_figures"
     """
     if results_path is None:
         results_dir = pathlib.Path("results")
-        results_files = list(results_dir.glob("joint_gradient_comparison_seed*.npz"))
+        results_files = list(results_dir.glob("joint_adam_vs_polish_4scenarios_seed*.npz"))
         if not results_files:
-            print("Error: No joint gradient comparison results found in results/")
-            print("Run joint_gradient_comparison.py first to generate results.")
+            print("Error: No joint adam vs polish 4scenarios results found in results/")
+            print("Run run_joint_adam_vs_polish_4scenarios.py first to generate results.")
             return
         results_path = max(results_files, key=lambda p: p.stat().st_mtime)
         print(f"Using most recent results file: {results_path}")
@@ -194,15 +206,15 @@ def main(results_path=None, save_dir="figures/joint_gradient_comparison_figures"
     # Plot each parameter
     plot_parameter_comparison(
         results, "L1", "m",
-        save_path / f"joint_L1_comparison_seed{seed}.pdf"
+        save_path / f"joint_adam_vs_polish_L1_seed{seed}.pdf"
     )
     plot_parameter_comparison(
         results, "ZF", "Ω",
-        save_path / f"joint_ZF_comparison_seed{seed}.pdf"
+        save_path / f"joint_adam_vs_polish_ZF_seed{seed}.pdf"
     )
     plot_parameter_comparison(
         results, "ZL", "Ω",
-        save_path / f"joint_ZL_comparison_seed{seed}.pdf"
+        save_path / f"joint_adam_vs_polish_ZL_seed{seed}.pdf"
     )
 
     print("Done!")
@@ -215,7 +227,7 @@ if __name__ == "__main__":
         help="Path to results .npz file (default: most recent in results/)"
     )
     parser.add_argument(
-        "--save-dir", type=str, default="figures/joint_gradient_comparison_figures",
+        "--save-dir", type=str, default="figures/joint_adam_vs_polish_4scenarios_figures",
         help="Directory to save figures"
     )
     args = parser.parse_args()

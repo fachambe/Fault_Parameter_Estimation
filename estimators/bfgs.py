@@ -109,8 +109,6 @@ class BFGSEstimator(Estimator):
         H = h_scale.unsqueeze(-1) * eye  # [N, d, d] scaled identity
 
         for it in range(self.bfgs_iters):
-            L1_old, ZF_old, ZL_old = self._u_to_theta(x)
-
             # Full BFGS search direction: p = -H g
             p = -torch.bmm(H, g.unsqueeze(-1)).squeeze(-1)
 
@@ -172,70 +170,13 @@ class BFGSEstimator(Estimator):
                 g_norm_sq_inv = (g_new[invalid] * g_new[invalid]).sum(dim=-1, keepdim=True).clamp(min=1e-8)
                 H[invalid] = (1.0 / g_norm_sq_inv).unsqueeze(-1) * eye[invalid]
 
-            L1_new, ZF_new, ZL_new = self._u_to_theta(x_new)
-
             if self.verbose and it % 2 == 0:
                 loss_drop = f - f_new
-                grad_norm = g.norm(dim=-1)
-                step_norm = s.norm(dim=-1)
-                p_norm = p.norm(dim=-1)
-
-                dL1 = (L1_new - L1_old).abs()
-                dZF = (ZF_new - ZF_old).abs()
-                dZL = (ZL_new - ZL_old).abs()
-
                 print(
                     f"BFGS Step {it}/{self.bfgs_iters} | "
                     f"Loss: {f.mean().item():.4f} -> {f_new.mean().item():.4f} | "
                     f"drop mean={loss_drop.mean().item():.3e}, "
                     f"max={loss_drop.max().item():.3e}"
-                )
-                worse = f_new > f
-                print("worse fraction:", worse.float().mean().item())
-                print("max loss increase:", (f_new - f).max().item())
-
-                print(
-                    f"  alpha mean={alpha.mean().item():.3e}, "
-                    f"min={alpha.min().item():.3e}, "
-                    f"max={alpha.max().item():.3e}"
-                )
-
-                print(
-                    "grad:",
-                    torch.quantile(grad_norm, 0.0).item(),
-                    torch.quantile(grad_norm, 0.25).item(),
-                    torch.quantile(grad_norm, 0.50).item(),
-                    torch.quantile(grad_norm, 0.75).item(),
-                    torch.quantile(grad_norm, 1.00).item(),
-                )
-                print(
-                    f"  p norm mean={p_norm.mean().item():.3e}, "
-                    f"step norm mean={step_norm.mean().item():.3e}, "
-                    f"max={step_norm.max().item():.3e}"
-                )
-                print(
-                    f"  curvature valid={valid.float().mean().item()*100:.1f}% | "
-                    f"sy mean={sy.mean().item():.3e}, "
-                    f"min={sy.min().item():.3e}"
-                )
-                print(
-                    f"  |ΔL1| mean={dL1.mean().item():.3e}, "
-                    f"|ΔZF| mean={dZF.mean().item():.3e}, "
-                    f"|ΔZL| mean={dZL.mean().item():.3e}"
-                )
-                print(
-                    f"  L1 mean={L1_new.mean().item():.4f}, "
-                    f"ZF mean={ZF_new.real.mean().item():.4f}"
-                    f"{ZF_new.imag.mean().item():+.4f}j, "
-                    f"ZL mean={ZL_new.real.mean().item():.4f}"
-                    f"{ZL_new.imag.mean().item():+.4f}j"
-                )
-                gTp = (g * p).sum(dim=-1)
-
-                print(
-                    "gTp mean =", gTp.mean().item(),
-                    "min =", gTp.min().item(),
-                    "max =", gTp.max().item()
                 )
 
             x, f, g = x_new.detach().requires_grad_(True), f_new, g_new

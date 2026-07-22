@@ -1,6 +1,6 @@
 # plotting/plot_L1_profile_benchmark.py
 """
-Plot results from L1_profile_benchmark.py:
+Plot results from run_L1_profile_benchmark.py:
 - 3 separate 2x2 figures (one per parameter: L1, ZF, ZL)
 - Each 2x2 shows RMSE vs sqrt(CRLB) across the 4 scenarios
 - Single estimator: L1ProfileMLE
@@ -70,13 +70,6 @@ def plot_parameter(results, param, unit, save_path):
         ["High_Freq_Short_Cable", "Low_Freq_Short_Cable"],
     ]
 
-    titles = {
-        "High_Freq_Long_Cable": "High Freq (2-10 MHz) + Long Cable (L=1000m)",
-        "Low_Freq_Long_Cable": "Low Freq (150-500 kHz) + Long Cable (L=1000m)",
-        "High_Freq_Short_Cable": "High Freq (2-10 MHz) + Short Cable (L=100m)",
-        "Low_Freq_Short_Cable": "Low Freq (150-500 kHz) + Short Cable (L=100m)",
-    }
-
     panel_labels = ["(a)", "(b)", "(c)", "(d)"]
     panel = 0
 
@@ -89,7 +82,6 @@ def plot_parameter(results, param, unit, save_path):
             # Check if scenario exists
             if scenario_key not in results["scenario_data"]:
                 ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
-                ax.set_title(titles[scenario_key], fontsize=10)
                 panel += 1
                 continue
 
@@ -128,12 +120,10 @@ def plot_parameter(results, param, unit, save_path):
             ax.set_xlabel("SNR (dB)", fontsize=14)
             ax.set_ylabel(f"RMSE / $\\sqrt{{\\mathrm{{CRLB}}}}$ ({unit})", fontsize=14)
             ax.set_yscale("log")
-            ax.set_title(titles[scenario_key], fontsize=10)
             ax.grid(True, alpha=0.3)
             ax.legend(loc="upper right", fontsize=10)
             ax.tick_params(labelsize=12)
 
-    plt.suptitle(f"{param} Estimation - L1ProfileMLE", fontsize=16, y=1.02)
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -153,7 +143,7 @@ def main(results_path=None, save_dir="figures/L1_profile_benchmark_figures"):
         results_files = list(results_dir.glob("L1_profile_benchmark_seed*.npz"))
         if not results_files:
             print("Error: No L1 profile benchmark results found in results/")
-            print("Run L1_profile_benchmark.py first to generate results.")
+            print("Run run_L1_profile_benchmark.py first to generate results.")
             return
         results_path = max(results_files, key=lambda p: p.stat().st_mtime)
         print(f"Using most recent results file: {results_path}")

@@ -16,7 +16,7 @@ from .plot_1D_benchmark import (
     plot_freq_impact_on_L1,
 )
 
-from .plot_gradient_comparison import (
+from .plot_1D_adam_4scenarios import (
     load_results as load_gradient_results,
     plot_comparison,
 )

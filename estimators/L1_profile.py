@@ -230,6 +230,7 @@ class L1ProfileMLE(Estimator):
         # 1) Profile L1 grid
         L1_top, uZ_top = self._profile_warm(obs_tf, noise_var)
         print("L1 top", L1_top)
+        
         # adad
         # L1_top, uZ_top = self._profile_cold(obs_tf, noise_var)
         # print("L1_top", L1_top)
@@ -270,19 +271,6 @@ class L1ProfileMLE(Estimator):
                     f"true={self.ZL_fix.real.item():.2f}{self.ZL_fix.imag.item():+.2f}j"
                 )
 
-
-
-        # 4) Optional BFGS polish
-        # if self.use_bfgs and self.bfgs_steps > 0:
-        #     if self.verbose:
-        #         print("Running BFGS polishing...")
-        #     U_refined = batched_bfgs(
-        #         U0=U, y=obs_tf, nv=noise_var,
-        #         fm=self.fm, u_to_theta=self._u_to_theta,
-        #         history_size=12, iters=self.bfgs_steps, alpha0=self.bfgs_lr
-        #     )
-        # else:
-        #     U_refined = U.detach()
         U_refined = U.detach() 
         # 5) Pick best seed per observation
         with torch.no_grad():
@@ -297,10 +285,72 @@ class L1ProfileMLE(Estimator):
 
         # 6) Return best estimates
         L1_best, ZF_best, ZL_best = self._u_to_theta(U_best)
-        print("L1 after", L1)
-        print("ZF after", ZF)
+
+        # 7) Report boundary hits
+        if self.verbose:
+            self._report_boundary_hits(L1_best, ZF_best, ZL_best, N)
+
         return {
             "L1": L1_best.cpu().numpy(),
             "ZF": ZF_best.cpu().numpy(),
             "ZL": ZL_best.cpu().numpy(),
         }
+
+    def _report_boundary_hits(self, L1, ZF, ZL, N, tol_frac=0.01):
+        """
+        Report percentage of estimates hitting constraint boundaries.
+
+        Args:
+            L1: [N] fault location estimates
+            ZF: [N] complex fault impedance estimates
+            ZL: [N] complex load impedance estimates
+            N: number of observations
+            tol_frac: fraction of range to consider "at boundary" (default 1%)
+        """
+        # L1 boundaries
+        L1_range = self.L1_hi - self.L1_lo
+        L1_tol = tol_frac * L1_range
+        L1_at_lo = (L1 <= self.L1_lo + L1_tol).sum().item()
+        L1_at_hi = (L1 >= self.L1_hi - L1_tol).sum().item()
+
+        # ZF real boundaries (sigmoid: ReZF_lo to ReZF_hi)
+        ZF_re_range = self.ReZF_hi - self.ReZF_lo
+        ZF_re_tol = tol_frac * ZF_re_range
+        ZF_re_at_lo = (ZF.real <= self.ReZF_lo + ZF_re_tol).sum().item()
+        ZF_re_at_hi = (ZF.real >= self.ReZF_hi - ZF_re_tol).sum().item()
+
+        # ZF imag boundaries (tanh: symmetric [-ImZF_max, +ImZF_max])
+        ZF_im_tol = tol_frac * 2 * self.ImZF_max
+        ZF_im_at_lo = (ZF.imag <= -self.ImZF_max + ZF_im_tol).sum().item()
+        ZF_im_at_hi = (ZF.imag >= self.ImZF_max - ZF_im_tol).sum().item()
+
+        # ZL real boundaries (sigmoid: ReZL_lo to ReZL_hi)
+        ZL_re_range = self.ReZL_hi - self.ReZL_lo
+        ZL_re_tol = tol_frac * ZL_re_range
+        ZL_re_at_lo = (ZL.real <= self.ReZL_lo + ZL_re_tol).sum().item()
+        ZL_re_at_hi = (ZL.real >= self.ReZL_hi - ZL_re_tol).sum().item()
+
+        # ZL imag boundaries (tanh: symmetric [-ImZL_max, +ImZL_max])
+        ZL_im_tol = tol_frac * 2 * self.ImZL_max
+        ZL_im_at_lo = (ZL.imag <= -self.ImZL_max + ZL_im_tol).sum().item()
+        ZL_im_at_hi = (ZL.imag >= self.ImZL_max - ZL_im_tol).sum().item()
+
+        print(f"\n{'='*60}")
+        print(f"BOUNDARY HIT REPORT (within {tol_frac*100:.0f}% of boundary)")
+        print(f"{'='*60}")
+        print(f"L1:     {L1_at_lo:3d}/{N} at lower ({self.L1_lo:.1f}m), "
+              f"{L1_at_hi:3d}/{N} at upper ({self.L1_hi:.1f}m) "
+              f"= {100*(L1_at_lo+L1_at_hi)/N:.1f}% total")
+        print(f"ZF_re:  {ZF_re_at_lo:3d}/{N} at lower ({self.ReZF_lo:.1f}Ω), "
+              f"{ZF_re_at_hi:3d}/{N} at upper ({self.ReZF_hi:.1f}Ω) "
+              f"= {100*(ZF_re_at_lo+ZF_re_at_hi)/N:.1f}% total")
+        print(f"ZF_im:  {ZF_im_at_lo:3d}/{N} at lower ({-self.ImZF_max:.1f}Ω), "
+              f"{ZF_im_at_hi:3d}/{N} at upper ({self.ImZF_max:.1f}Ω) "
+              f"= {100*(ZF_im_at_lo+ZF_im_at_hi)/N:.1f}% total")
+        print(f"ZL_re:  {ZL_re_at_lo:3d}/{N} at lower ({self.ReZL_lo:.1f}Ω), "
+              f"{ZL_re_at_hi:3d}/{N} at upper ({self.ReZL_hi:.1f}Ω) "
+              f"= {100*(ZL_re_at_lo+ZL_re_at_hi)/N:.1f}% total")
+        print(f"ZL_im:  {ZL_im_at_lo:3d}/{N} at lower ({-self.ImZL_max:.1f}Ω), "
+              f"{ZL_im_at_hi:3d}/{N} at upper ({self.ImZL_max:.1f}Ω) "
+              f"= {100*(ZL_im_at_lo+ZL_im_at_hi)/N:.1f}% total")
+        print(f"{'='*60}\n")

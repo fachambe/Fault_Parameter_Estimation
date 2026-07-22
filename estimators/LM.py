@@ -2,6 +2,7 @@
 import torch
 import numpy as np
 from .base import Estimator
+from torch.func import jacfwd, vmap
 
 Tensor = torch.Tensor
 
@@ -29,9 +30,9 @@ class LMEstimator(Estimator):
                  mode,
                  device="cuda",
                  max_iters: int = 10,
-                 lambda_init: float = 1e-3,
-                 lambda_up: float = 10.0,
-                 lambda_down: float = 0.1,
+                 lambda_init: float = 1e-3, #Starting trust region "size"
+                 lambda_up: float = 10.0, # Shrink trust region (reject step)
+                 lambda_down: float = 0.1, # Expand trust region (accept step)
                  lambda_min: float = 1e-10,
                  lambda_max: float = 1e10,
                  tol: float = 1e-8,
@@ -48,7 +49,7 @@ class LMEstimator(Estimator):
 
     def _compute_residuals_and_jacobian(self, u, y, nv_sqrt):
         """
-        Compute weighted residuals and Jacobian for LM.
+        Compute weighted residuals and Jacobian for LM using vmap + jacfwd.
 
         Args:
             u: [N, 5] unconstrained parameters
@@ -60,45 +61,30 @@ class LMEstimator(Estimator):
             J: [N, 2F, 5] Jacobian dr/du
             cost: [N] sum of squared residuals
         """
-        N, F = y.shape
-        d = 5
+        def single_residual(u_single, y_re, y_im, nv_sqrt_single):
+            """Residual for one observation: [5] -> [2F]
 
-        # Enable gradient tracking
-        u = u.detach().clone().requires_grad_(True)
+            Note: y split into real/imag because jacfwd doesn't support complex inputs.
+            """
+            y_single = torch.complex(y_re, y_im)
+            L1, ZF, ZL = self._u_to_theta(u_single.unsqueeze(0))
+            H_pred = self.fm.compute_H_complex(L1, ZF, ZL).squeeze(0)  # [F]
 
-        # Forward pass
-        L1, ZF, ZL = self._u_to_theta(u)
-        H_pred = self.fm.compute_H_complex(L1, ZF, ZL)  # [N, F]
+            diff = y_single - H_pred  # [F] complex
+            r_real = diff.real / nv_sqrt_single
+            r_imag = diff.imag / nv_sqrt_single
+            return torch.cat([r_real, r_imag], dim=-1)  # [2F]
 
-        # Weighted residuals: (y - H) / sqrt(var)
-        diff = y - H_pred  # [N, F] complex
-        r_real = diff.real / nv_sqrt  # [N, F]
-        r_imag = diff.imag / nv_sqrt  # [N, F]
-        r = torch.cat([r_real, r_imag], dim=-1)  # [N, 2F]
+        y_re, y_im = y.real, y.imag
+        # Batched residuals: [N, 2F]
+        r = vmap(single_residual)(u, y_re, y_im, nv_sqrt)
+        # Batched Jacobians: jacfwd w.r.t. arg 0 (u), vmapped over N
+        J = vmap(jacfwd(single_residual, argnums=0))(u, y_re, y_im, nv_sqrt)  # [N, 2F, 5]
 
-        # Cost = sum of squared residuals
         cost = (r ** 2).sum(dim=-1)  # [N]
 
-        # Compute Jacobian using autograd
-        # J[n, i, j] = dr[n, i] / du[n, j]
-        J = torch.zeros(N, 2 * F, d, device=self.device)
+        return r, J, cost
 
-        for i in range(2 * F):
-            # Gradient of r[:, i] w.r.t. u
-            grad_outputs = torch.zeros(N, 2 * F, device=self.device)
-            grad_outputs[:, i] = 1.0
-
-            grads = torch.autograd.grad(
-                outputs=r,
-                inputs=u,
-                grad_outputs=grad_outputs,
-                retain_graph=True,
-                create_graph=False
-            )[0]  # [N, 5]
-
-            J[:, i, :] = grads
-
-        return r.detach(), J.detach(), cost.detach()
 
     def _batched_lm(self, U0, y, nv):
         """
@@ -112,7 +98,7 @@ class LMEstimator(Estimator):
         Returns:
             U_final: [N, 5] optimized parameters
         """
-        N, F = y.shape
+        N, _ = y.shape
 
         nv_sqrt = torch.sqrt(nv)  # For weighting residuals
 

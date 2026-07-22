@@ -40,7 +40,6 @@ class GradientMLE(Estimator):
                  device="cuda",
                  adam_steps: int = 20000,
                  adam_lr: float = 1e-2,
-                 adam_betas: tuple = (0.7, 0.9),  # Lower betas for oscillatory landscapes
                  use_bfgs: bool = False,
                  bfgs_steps: int = 60,
                  bfgs_lr: float = 1,
@@ -53,7 +52,6 @@ class GradientMLE(Estimator):
         # Adam hyperparameters
         self.adam_steps = int(adam_steps)
         self.adam_lr = float(adam_lr)
-        self.adam_betas = adam_betas
         self.verbose = bool(verbose)
 
         # BFGS hyperparameters
@@ -147,6 +145,16 @@ class GradientMLE(Estimator):
                 L1 = self.L1_fix.expand(N)
                 ZF = self.ZF_fix.expand(N)
                 ZL = torch.complex(self.ZL_fix.real.expand(N), theta)
+
+            # Forward model: [N, F]
+            pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
+
+            # Compute NLL per observation [N] - element-wise comparison
+            nll_per_obs = self.lik.nll_elementwise(obs_tf, pred_tf, noise_var)
+
+            # Sum and backprop - each nll_per_obs[n] depends only on U[n]
+            loss = nll_per_obs.mean()
+
             if step % 500 == 0:
                 if self.target == "L1":
                     true_val = self.L1_fix.item()
@@ -158,15 +166,8 @@ class GradientMLE(Estimator):
                     true_val = self.ZL_fix.real.item()
                 else:  # ZL_im
                     true_val = self.ZL_fix.imag.item()
-                print(f"Step {step}/{self.adam_steps} | {self.target}: est_mean={theta.mean().item():.2f}, true={true_val:.2f}")
-            # Forward model: [N, F]
-            pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
+                print(f"Step {step}/{self.adam_steps} | {self.target}: est_mean={theta.mean().item():.4f}, true={true_val:.2f}, loss={loss.item():.4f}")
 
-            # Compute NLL per observation [N] - element-wise comparison
-            nll_per_obs = self.lik.nll_elementwise(obs_tf, pred_tf, noise_var)
-
-            # Sum and backprop - each nll_per_obs[n] depends only on U[n]
-            loss = nll_per_obs.mean()
             loss.backward()
             opt.step()
 
@@ -207,7 +208,7 @@ class GradientMLE(Estimator):
         for step in range(self.adam_steps):
             opt.zero_grad()
 
-            L1, ZF, ZL = self._u_to_theta(U)
+            L1, ZF, ZL = self._u_to_theta(U) #[N] each
 
             # Forward model: [N, F]
             pred_tf = self.fm.compute_H_complex(L1, ZF, ZL)
@@ -276,18 +277,80 @@ class GradientMLE(Estimator):
         # Compute RMSE after polishing
         with torch.no_grad():
             L1, ZF, ZL = self._u_to_theta(U_refined)
-            print("L1 after", L1)
-            print("ZF after", ZF)
             rmse_L1_after = torch.sqrt(((L1 - self.L1_fix) ** 2).mean()).item()
             rmse_ZF_after = torch.sqrt(((ZF - self.ZF_fix).abs() ** 2).mean()).item()
             rmse_ZL_after = torch.sqrt(((ZL - self.ZL_fix).abs() ** 2).mean()).item()
             print(f"After polishing  | RMSE L1: {rmse_L1_after:.4f}, ZF: {rmse_ZF_after:.4f}, ZL: {rmse_ZL_after:.4f}")
             print(f"Improvement      | ΔL1: {rmse_L1_before - rmse_L1_after:+.4f}, ΔZF: {rmse_ZF_before - rmse_ZF_after:+.4f}, ΔZL: {rmse_ZL_before - rmse_ZL_after:+.4f}")
+
+            # Report boundary hits
+            if self.verbose:
+                self._report_boundary_hits(L1, ZF, ZL, N)
+
             return {
                 "L1": L1.cpu().numpy(),
                 "ZF": ZF.cpu().numpy(),
                 "ZL": ZL.cpu().numpy(),
             }
+
+    def _report_boundary_hits(self, L1, ZF, ZL, N, tol_frac=0.01):
+        """
+        Report percentage of estimates hitting constraint boundaries.
+
+        Args:
+            L1: [N] fault location estimates
+            ZF: [N] complex fault impedance estimates
+            ZL: [N] complex load impedance estimates
+            N: number of observations
+            tol_frac: fraction of range to consider "at boundary" (default 1%)
+        """
+        # L1 boundaries
+        L1_range = self.L1_hi - self.L1_lo
+        L1_tol = tol_frac * L1_range
+        L1_at_lo = (L1 <= self.L1_lo + L1_tol).sum().item()
+        L1_at_hi = (L1 >= self.L1_hi - L1_tol).sum().item()
+
+        # ZF real boundaries (sigmoid: ReZF_lo to ReZF_hi)
+        ZF_re_range = self.ReZF_hi - self.ReZF_lo
+        ZF_re_tol = tol_frac * ZF_re_range
+        ZF_re_at_lo = (ZF.real <= self.ReZF_lo + ZF_re_tol).sum().item()
+        ZF_re_at_hi = (ZF.real >= self.ReZF_hi - ZF_re_tol).sum().item()
+
+        # ZF imag boundaries (tanh: symmetric [-ImZF_max, +ImZF_max])
+        ZF_im_tol = tol_frac * 2 * self.ImZF_max
+        ZF_im_at_lo = (ZF.imag <= -self.ImZF_max + ZF_im_tol).sum().item()
+        ZF_im_at_hi = (ZF.imag >= self.ImZF_max - ZF_im_tol).sum().item()
+
+        # ZL real boundaries (sigmoid: ReZL_lo to ReZL_hi)
+        ZL_re_range = self.ReZL_hi - self.ReZL_lo
+        ZL_re_tol = tol_frac * ZL_re_range
+        ZL_re_at_lo = (ZL.real <= self.ReZL_lo + ZL_re_tol).sum().item()
+        ZL_re_at_hi = (ZL.real >= self.ReZL_hi - ZL_re_tol).sum().item()
+
+        # ZL imag boundaries (tanh: symmetric [-ImZL_max, +ImZL_max])
+        ZL_im_tol = tol_frac * 2 * self.ImZL_max
+        ZL_im_at_lo = (ZL.imag <= -self.ImZL_max + ZL_im_tol).sum().item()
+        ZL_im_at_hi = (ZL.imag >= self.ImZL_max - ZL_im_tol).sum().item()
+
+        print(f"\n{'='*60}")
+        print(f"BOUNDARY HIT REPORT (within {tol_frac*100:.0f}% of boundary)")
+        print(f"{'='*60}")
+        print(f"L1:     {L1_at_lo:3d}/{N} at lower ({self.L1_lo:.1f}m), "
+              f"{L1_at_hi:3d}/{N} at upper ({self.L1_hi:.1f}m) "
+              f"= {100*(L1_at_lo+L1_at_hi)/N:.1f}% total")
+        print(f"ZF_re:  {ZF_re_at_lo:3d}/{N} at lower ({self.ReZF_lo:.1f}Ω), "
+              f"{ZF_re_at_hi:3d}/{N} at upper ({self.ReZF_hi:.1f}Ω) "
+              f"= {100*(ZF_re_at_lo+ZF_re_at_hi)/N:.1f}% total")
+        print(f"ZF_im:  {ZF_im_at_lo:3d}/{N} at lower ({-self.ImZF_max:.1f}Ω), "
+              f"{ZF_im_at_hi:3d}/{N} at upper ({self.ImZF_max:.1f}Ω) "
+              f"= {100*(ZF_im_at_lo+ZF_im_at_hi)/N:.1f}% total")
+        print(f"ZL_re:  {ZL_re_at_lo:3d}/{N} at lower ({self.ReZL_lo:.1f}Ω), "
+              f"{ZL_re_at_hi:3d}/{N} at upper ({self.ReZL_hi:.1f}Ω) "
+              f"= {100*(ZL_re_at_lo+ZL_re_at_hi)/N:.1f}% total")
+        print(f"ZL_im:  {ZL_im_at_lo:3d}/{N} at lower ({-self.ImZL_max:.1f}Ω), "
+              f"{ZL_im_at_hi:3d}/{N} at upper ({self.ImZL_max:.1f}Ω) "
+              f"= {100*(ZL_im_at_lo+ZL_im_at_hi)/N:.1f}% total")
+        print(f"{'='*60}\n")
 
 
 

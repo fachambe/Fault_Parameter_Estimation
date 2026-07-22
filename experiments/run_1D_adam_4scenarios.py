@@ -1,4 +1,4 @@
-# experiments/1D_gradient_comparison.py
+# experiments/run_1D_adam_4scenarios.py
 """
 Compare 1D gradient MLE for L1 across 4 scenarios:
 - High freq (2-10 MHz) + Long cable (L=1000m)
@@ -6,7 +6,7 @@ Compare 1D gradient MLE for L1 across 4 scenarios:
 - High freq (2-10 MHz) + Short cable (L=100m)
 - Low freq (150-500 kHz) + Short cable (L=100m)
 
-Generates a 2x2 figure showing RMSE vs sqrt(CRLB) for L1 with plotting/plot_gradient_comparison.py
+Generates a 2x2 figure showing RMSE vs sqrt(CRLB) for L1 with plotting/plot_1D_adam_4scenarios.py
 
 This file is self-contained and does not depend on benchmark.yaml.
 """
@@ -23,6 +23,7 @@ from core.likelihoods import ComplexGaussianLik
 from core.crlb import crlb_for_1_real_param
 from estimators.mle_gradient import GradientMLE
 from data.manager import DatasetManager
+from utils.experiment import fmt_freq
 
 # =============================================================================
 # EXPERIMENT CONFIGURATION (self-contained, no yaml dependency)
@@ -32,6 +33,7 @@ Zs = 50.0  # Source impedance (ohms)
 N = 100    # Number of observations
 SEED = 5692
 F = 200    # Number of frequency points per scenario
+#SNR_DBS = [40]
 SNR_DBS = [0, 5, 10, 15, 20, 25, 30, 35, 40]
 
 # Parameter ranges for ZF and ZL (used in true_range)
@@ -45,14 +47,6 @@ SCENARIOS = [
     {"name": "High_Freq_Short_Cable", "freq_start": 2e6,   "freq_stop": 10e6,  "L": 100, "L1": 25.0},
     {"name": "Low_Freq_Short_Cable",  "freq_start": 150e3, "freq_stop": 500e3, "L": 100, "L1": 25.0},
 ]
-
-
-def fmt_freq(hz):
-    """Format frequency for display/filenames."""
-    if hz >= 1e6:
-        return f"{hz/1e6:.1f}MHz".replace(".0MHz", "MHz")
-    else:
-        return f"{hz/1e3:.0f}kHz"
 
 
 def main():
@@ -75,6 +69,9 @@ def main():
 
     for scenario in SCENARIOS:
         scenario_name = scenario["name"]
+        N_obs = N  
+        if scenario_name == "Low_Freq_Short_Cable":
+            N_obs = 5000
         fstart = scenario["freq_start"]
         fend = scenario["freq_stop"]
         L = scenario["L"]
@@ -118,7 +115,7 @@ def main():
             # Generate observations for this scenario
             data = dm.generate_observations(
                 snr_db=snr_db,
-                N=N,
+                N=N_obs,
                 fm=fm,
                 seed=SEED,
                 target="ALL3SP",  # frequentist: same params for all N
@@ -128,7 +125,6 @@ def main():
 
             h_obs = torch.tensor(data["h_obs_real"], device=device) + 1j * torch.tensor(data["h_obs_imag"], device=device)
             var = torch.tensor(data["noise_var"], device=device)
-
             # Run gradient MLE for L1
             est = GradientMLE(
                 fm=fm,
@@ -138,6 +134,7 @@ def main():
                 true_range=true_range,
                 mode="1d",
                 device=device,
+                adam_steps=2000,
             )
             preds = est.predict(h_obs, var)  # [N]
 
@@ -150,8 +147,8 @@ def main():
             sqrt_crlb = float(torch.sqrt(crlb).cpu())
             crlb_sqrt.append(sqrt_crlb)
 
-            print(f"    RMSE = {rmse:.4f}, sqrt(CRLB) = {sqrt_crlb:.4f}")
-
+            print(f"RMSE = {rmse:.4f}, sqrt(CRLB) = {sqrt_crlb:.4f}")
+            
         # Store results
         all_results[scenario_name] = {
             "snrs": np.array(SNR_DBS),
@@ -164,7 +161,7 @@ def main():
     # Save results
     results_dir = pathlib.Path("results")
     results_dir.mkdir(exist_ok=True)
-    results_file = results_dir / f"gradient_comparison_seed{SEED}.npz"
+    results_file = results_dir / f"1D_adam_4scenarios_seed{SEED}.npz"
 
     # Save with scenario metadata
     save_dict = {
@@ -183,7 +180,6 @@ def main():
 
     end_time = time.perf_counter()
     print(f"\nTotal time: {end_time - start_time:.2f} seconds")
-    print(f"Run plot_gradient_comparison.py to generate figures.")
 
 
 if __name__ == "__main__":

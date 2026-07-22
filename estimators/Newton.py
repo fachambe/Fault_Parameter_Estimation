@@ -100,7 +100,6 @@ class NewtonEstimator(Estimator):
         """
         # Batched eigendecomposition
         eigvals, eigvecs = torch.linalg.eigh(hess)  # [N, 5], [N, 5, 5]
-
         # Count how many have negative eigenvalues
         num_neg = (eigvals < 0).any(dim=-1).sum().item()
         print("number of negative eigenvalues", num_neg)
@@ -196,7 +195,6 @@ class NewtonEstimator(Estimator):
                     print(f"Newton converged at iteration {it}")
                 break
 
-            # Use FULL Hessian with eigenvalue modification
             # Modify Hessian to ensure positive definiteness
             B, eigvals, num_neg = self._modify_hessians_batched(hess)
 
@@ -214,8 +212,6 @@ class NewtonEstimator(Estimator):
             alpha, f_new, x_new = self._armijo_line_search_batched(
                 x, f, grad, p, obs_tf, noise_var
             )
-            # After line search - compute all params
-            L1_after, ZF_after, ZL_after = self._u_to_theta(x_new)
 
             # NLL reduction (what Newton actually optimizes)
             nll_reduced = (f_new < f).sum().item()

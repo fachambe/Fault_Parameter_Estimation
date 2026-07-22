@@ -1,25 +1,42 @@
 # estimators/mle_gridsearch.py
 import torch
+import numpy as np
 from estimators.base import Estimator
 
 class GridSearchMLE(Estimator):
-    def __init__(self, fm, likelihood, grid, target, fixed, device):
+    def __init__(self, fm, likelihood, grid, target, fixed, device, batch_size=1000):
         """
-        grid:  [K] float candidates for the target parameter
+        Grid search MLE estimator with batching for memory efficiency.
+
+        Args:
+            fm: Forward model
+            likelihood: Likelihood function
+            grid: [K] float candidates for the target parameter
+            target: Parameter to estimate ("L1", "ZF_re", etc.)
+            fixed: Dict with fixed parameter values
+            device: torch device
+            batch_size: Number of observations to process at once (default 500)
         """
         super().__init__(fm, likelihood, target, fixed, device=device)
         self.grid = grid
+        self.batch_size = batch_size
 
     @torch.no_grad()
     def predict(self, obs_tf, noise_var):
         """
-        obs_tf:    [N, F] complex64 tensor
-        noise_var: [N, 1] or [N, F] float32 tensor
-        Returns:   dict with key=target, value=numpy array [N] of estimates
+        Estimate target parameter for each observation using grid search.
+
+        Args:
+            obs_tf: [N, F] complex64 tensor of observations
+            noise_var: [N, 1] or [N, F] float32 tensor of noise variances
+
+        Returns:
+            dict with key=target, value=numpy array [N] of estimates
         """
         K = self.grid.numel()
+        N = obs_tf.shape[0]
 
-        # Build parameter arrays [K] for all candidates
+        # Build parameter arrays [K] for all candidates (done once)
         if self.target == "L1":
             L1 = self.grid.to(dtype=torch.float32, device=self.device)
             ZF = self.ZF_fix.expand(K)
@@ -43,14 +60,22 @@ class GridSearchMLE(Estimator):
         else:
             raise ValueError(f"Unknown target: {self.target}")
 
-        # Forward model: H[K, F]
+        # Forward model: H[K, F] - computed once for all observations
         H = self.fm.compute_H_complex(L1=L1, ZF=ZF, ZL=ZL)
 
-        # NLL matrix: [K, N]
-        nll_KN = self.lik.nll_matrix(obs_tf, H, noise_var)
+        # Process observations in batches to avoid OOM
+        best_vals = np.empty(N, dtype=np.float32)
 
-        # Best candidate per observation (lowest NLL)
-        best_idx = nll_KN.argmin(dim=0)  # [N]
-        best_vals = self.grid[best_idx].detach().cpu().numpy()
+        for start in range(0, N, self.batch_size):
+            end = min(start + self.batch_size, N)
+            obs_batch = obs_tf[start:end]  # [B, F]
+            var_batch = noise_var[start:end]  # [B, 1] or [B, F]
+
+            # NLL matrix: [K, B]
+            nll_KB = self.lik.nll_matrix(obs_batch, H, var_batch)
+
+            # Best candidate per observation in batch
+            best_idx = nll_KB.argmin(dim=0)  # [B]
+            best_vals[start:end] = self.grid[best_idx].cpu().numpy()
 
         return {self.target: best_vals}

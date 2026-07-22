@@ -1,6 +1,6 @@
-# plotting/plot_gradient_comparison.py
+# plotting/plot_1D_adam_4scenarios.py
 """
-Plot results from 1D_gradient_comparison.py:
+Plot results from run_1D_adam_4scenarios.py:
 - 2x2 figure showing RMSE vs sqrt(CRLB) for L1 across 4 scenarios:
   - High freq (2-10 MHz) + Long cable (L=1000m)
   - Low freq (150-500 kHz) + Long cable (L=1000m)
@@ -46,7 +46,7 @@ def load_results(results_path):
     return results
 
 
-def plot_comparison(results, save_dir="figures/plot_gradient_comparison_figures"):
+def plot_comparison(results, save_dir="figures/plot_1D_adam_4scenarios_figures"):
     """Create 2x2 figure showing RMSE vs sqrt(CRLB) for L1 across 4 scenarios."""
     save_path = pathlib.Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -124,14 +124,14 @@ def plot_comparison(results, save_dir="figures/plot_gradient_comparison_figures"
     plt.tight_layout()
 
     # Save figure
-    fig_path = save_path / f"gradient_comparison_seed{results['seed']}.pdf"
+    fig_path = save_path / f"1D_adam_4scenarios_seed{results['seed']}.pdf"
     plt.savefig(fig_path, dpi=300, bbox_inches="tight")
     plt.close()
 
     print(f"Saved figure to {fig_path}")
 
 
-def main(results_path=None, save_dir="figures/plot_gradient_comparison_figures"):
+def main(results_path=None, save_dir="figures/plot_1D_adam_4scenarios_figures"):
     """
     Main plotting function.
 
@@ -142,10 +142,10 @@ def main(results_path=None, save_dir="figures/plot_gradient_comparison_figures")
     if results_path is None:
         # Find the most recent results file
         results_dir = pathlib.Path("results")
-        results_files = list(results_dir.glob("gradient_comparison_seed*.npz"))
+        results_files = list(results_dir.glob("1D_adam_4scenarios_seed*.npz"))
         if not results_files:
-            print("Error: No gradient comparison results found in results/")
-            print("Run 1D_gradient_comparison.py first to generate results.")
+            print("Error: No 1D adam 4scenarios results found in results/")
+            print("Run run_1D_adam_4scenarios.py first to generate results.")
             return
         # Use most recent
         results_path = max(results_files, key=lambda p: p.stat().st_mtime)
@@ -171,7 +171,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--save-dir",
         type=str,
-        default="figures/plot_gradient_comparison_figures",
+        default="figures/plot_1D_adam_4scenarios_figures",
         help="Directory to save figures",
     )
     args = parser.parse_args()
