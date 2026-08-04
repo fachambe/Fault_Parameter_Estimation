@@ -27,13 +27,14 @@ from pyro.infer import SVI, Trace_ELBO
 start_time = time.time()
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
-OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
+OUTPUT_DIR = "stage_1_results"
+#OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 1 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 5.0 #Hyperparameter of beta prior
 
@@ -160,7 +161,7 @@ BACKBONE_KEYS = ["l_w_0", "l_w_1", "l_w_4", "l_w_25", "l_w_28"]
 # ---- Global Network Parameter Dictionary ----
 network_params = {
     "cable_lengths": {  # 30 parameters, set all to 0.25
-        f"l_w_{i}": {"value": 0.25, "inferred": True, "range": (6, 8)}
+        f"l_w_{i}": {"value": 0.25, "inferred": True, "range": (5, 10)}
         for i in range(30)
     },
     "conductor_radii": {  # Fixed values, not inferred
@@ -198,7 +199,8 @@ def calculate_cable_parameters(r_w, omega, n):
     epsilon = 3.19 * 1e-11
     dc = 4 * 1e-4 + 3.02 * r_w
     dc2 = math.sqrt(2.0) * dc  
-    tandelta = 1e-6
+    #tandelta = 1e-6
+    tan_delta = 0.01
     delta = 1 / torch.sqrt(torch.pi * mu_0 * sigma * f)  # Skin depth
     r = torch.where(
         r_w <= 2 * delta,
@@ -220,7 +222,12 @@ def calculate_cable_parameters(r_w, omega, n):
     L_new = L.unsqueeze(0).expand(num_freqs, -1, -1)
     C = mu_0 * epsilon * torch.linalg.inv(L)
     C_new = C.unsqueeze(0).expand(num_freqs, -1, -1)
-    G_new = torch.zeros((num_freqs, n, n), dtype=torch.complex64, device=device)
+    #G_new = torch.zeros((num_freqs, n, n), dtype=torch.complex64, device=device)
+    G_new = (
+    omega.reshape(-1, 1, 1)
+    * tan_delta
+    * C_new
+).to(torch.complex64)
     return R, L_new, C_new, G_new
 
 def get_mtl_matrices(R, L, C, G, n, omega):
@@ -1490,7 +1497,7 @@ def set_network_params_from_normalized(sampled_theta, param_order_list):
 def perform_global_sensitivity_analysis(cable_lengths_norm, load_params_norm):
     """
     Perform global sensitivity analysis on network parameters.
-    
+
     All parameters are in NORMALIZED [0,1] range.
     Sweeps each parameter over [0,1] and measures ||H(perturbed) - H(nominal)||.
 
@@ -1503,6 +1510,9 @@ def perform_global_sensitivity_analysis(cable_lengths_norm, load_params_norm):
         sorted_keys: List of all params sorted from most sensitive to least sensitive
         sensitivities: List of sensitivity values (%) corresponding to sorted_keys
     """
+    # Get number of inferred parameters
+    _, p = get_inferred_param_order()
+
     variations = {}
 
     # Compute nominal H with current normalized params
@@ -1821,7 +1831,7 @@ def get_true_param_value(key):
         # Cable length
         return network_params["cable_lengths"][key]["value"]
 
-def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, num_steps, m, M):
+def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, num_steps, m, M, p_val=None):
     # H1_noisy is (N, F, 2), float NOT COMPLEX. N = 1 almost always. 
     pyro.clear_param_store()
 
@@ -1870,7 +1880,7 @@ def run_inference(H1_noisy, model, guide, sorted_keys, std_f, snr_db, num_steps,
         }
 
         if step % 25 == 0:
-            print(f"\n===== SNR {snr_db} | m = {m+1}/{M} | Step {step} | loss = -ELBO: {loss:.6f} =====")
+            print(f"\n===== p = {p_val} | SNR {snr_db} | m = {m+1}/{M} | Step {step} | loss = -ELBO: {loss:.6f} =====")
             print("\n Top 20 Most Sensitive Parameters")
             param_store = pyro.get_param_store()
             for key in sorted_keys[:20]:
@@ -2113,7 +2123,7 @@ def plot_CI_and_pred_TF(best_params, snr_db, scenario, is_Bayesian, num_samples=
     print(f"Saved: {filename}, {filename.replace('.pdf', '.npz')}, {filename.replace('.pdf', '.json')}")
     #return tf_mean, tf_lower, tf_upper
 
-def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, M, num_steps, scenario, true_network_params = None, true_param_order = None):
+def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, M, num_steps, scenario, true_network_params = None, true_param_order = None, p_val=None):
     """
     Compute Frequentist MSE via Monte Carlo at specific SNR.
     For each trial:
@@ -2162,9 +2172,9 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, M, num_steps, scenar
 
         # 2. Run SVI inference
         if scenario == 'with_fault':
-            _, best_params, _ = run_inference(H1_noisy, model_with_fault, guide, selected_keys, std_f, snr_db, num_steps, m, M)
+            _, best_params, _ = run_inference(H1_noisy, model_with_fault, guide, selected_keys, std_f, snr_db, num_steps, m, M, p_val)
         else:
-            _, best_params, _ = run_inference(H1_noisy, model_no_fault, guide, selected_keys, std_f, snr_db, num_steps, m, M)
+            _, best_params, _ = run_inference(H1_noisy, model_no_fault, guide, selected_keys, std_f, snr_db, num_steps, m, M, p_val)
 
         # 3. Extract posterior means for this run
         posterior_means = extract_posterior_means(best_params)
@@ -2406,8 +2416,8 @@ def perform_local_prior_averaged_sensitivity_analysis(alpha, M, scenario):
                           key=lambda k: sensitivity_dict[k],
                           reverse=True)
 
-    # Select top p
-    selected = sorted_params[:p]
+    # Select top n_params (all inferred params, just ranked)
+    selected = sorted_params[:n_params]
 
     # Build sensitivities list in sorted order (as percentages)
     sensitivities = [sensitivity_dict[k] * 100 for k in sorted_params]
@@ -2415,34 +2425,12 @@ def perform_local_prior_averaged_sensitivity_analysis(alpha, M, scenario):
     # Print results
     print(f"\n--- Prior-Averaged Sensitivity Results ---")
     for idx, k in enumerate(sorted_params):
-        if idx == p:
-            print(f"--- Top {p} selected above this line ---")
+        if idx == n_params:
+            print(f"--- Top {n_params} selected above this line ---")
         print(f"{k}: {sensitivity_dict[k]*100:.5f}%")
 
-    print(f"\nSelected top {p} most sensitive parameters: {selected}")
+    print(f"\nSelected top {n_params} most sensitive parameters: {selected}")
     print(f"Number of selected parameters: {len(selected)}")
-
-    # Set inferred=False for parameters NOT in top p
-    if p > 0:
-        disabled_count = 0
-        for param_key in sorted_params[p:]:
-            if "." in param_key:
-                parts = param_key.split(".")
-                entity_name = parts[0]
-                param_name = parts[1]
-                if entity_name in network_params["loads"]:
-                    if param_name in network_params["loads"][entity_name]:
-                        network_params["loads"][entity_name][param_name]["inferred"] = False
-                        disabled_count += 1
-            else:
-                if param_key in network_params["cable_lengths"]:
-                    network_params["cable_lengths"][param_key]["inferred"] = False
-                    disabled_count += 1
-                elif "fault_parameters" in network_params and param_key in network_params["fault_parameters"]:
-                    network_params["fault_parameters"][param_key]["inferred"] = False
-                    disabled_count += 1
-
-        print(f"\nDisabled inference for {disabled_count} parameters (not in top {p})")
 
     sorted_keys = sorted_params
     return selected, sorted_keys, sensitivities
@@ -3141,6 +3129,241 @@ def plot_nll_vs_ZFim_complex_mtl(snr_db):
     plt.savefig("nll_vs_ZFim_complex", dpi=300, bbox_inches='tight')
     plt.close()
 
+def reset_network_params_to_inferred():
+    """
+    Reset all network parameters to inferred=True (except R_m2 which is always fixed).
+    Used to reset state between different p-value runs.
+    """
+    for cable_name in network_params["cable_lengths"]:
+        network_params["cable_lengths"][cable_name]["inferred"] = True
+        network_params["cable_lengths"][cable_name]["value"] = 0.25  # Reset to nominal
+    for load_name in network_params["loads"]:
+        for param_name in network_params["loads"][load_name]:
+            if param_name == "R_m2":
+                continue  # R_m2 is fixed, never inferred
+            network_params["loads"][load_name][param_name]["inferred"] = True
+            network_params["loads"][load_name][param_name]["value"] = 0.25  # Reset to nominal
+    for fault_name in network_params["fault_parameters"]:
+        network_params["fault_parameters"][fault_name]["inferred"] = False
+
+
+def set_top_p_params_inferred(sorted_keys, p_value):
+    """
+    Set only the top p_value parameters as inferred, disable the rest.
+
+    Args:
+        sorted_keys: List of parameter keys sorted by sensitivity (most to least)
+        p_value: Number of top parameters to keep inferred
+    """
+    # First disable all
+    for cable_name in network_params["cable_lengths"]:
+        network_params["cable_lengths"][cable_name]["inferred"] = False
+    for load_name in network_params["loads"]:
+        for param_name in network_params["loads"][load_name]:
+            if param_name == "R_m2":
+                continue
+            network_params["loads"][load_name][param_name]["inferred"] = False
+
+    # Enable only top p_value
+    for key in sorted_keys[:p_value]:
+        if "." in key:
+            # Load parameter: "load_0.C_m_leak"
+            parts = key.split(".")
+            load_name = parts[0]
+            param_name = parts[1]
+            network_params["loads"][load_name][param_name]["inferred"] = True
+        else:
+            # Cable length parameter
+            network_params["cable_lengths"][key]["inferred"] = True
+
+
+def run_stage1_inference(snr_dbs, num_steps, p_values=[10,20,30,40,50]):
+    """
+    Run Stage 1 inference only (network parameters, no fault) with RMSE vs CRLB analysis.
+
+    For each p value, we:
+    1. Perform sensitivity analysis to rank all parameters
+    2. Select top-p parameters for inference
+    3. Compute CRLB for selected parameters
+    4. Run M Monte Carlo trials to compute RMSE
+    5. Plot RMSE vs sqrt(CRLB) curves across SNR
+
+    Args:
+        snr_dbs: List of SNR values in dB to sweep
+        num_steps: Number of SVI steps per inference run
+        p_values: List of p values to test (number of parameters to infer)
+    """
+    scenario = "no_fault"
+
+    # First, reset and get full sensitivity ranking with ALL parameters enabled
+    reset_network_params_to_inferred()
+
+    # Get param order for all parameters
+    param_order_list_full, p_tot = get_inferred_param_order()
+
+    # Sample theta from prior instead of using fixed 0.25
+    torch.manual_seed(SEED)
+    beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
+    theta_true = beta_dist.sample((p_tot,))
+    set_network_params_from_normalized(theta_true, param_order_list_full)
+
+    # Perform sensitivity analysis at sampled theta
+    _, sorted_keys_all, sensitivities_all = perform_local_sensitivity_analysis(scenario)
+    print(f"\n{'='*60}")
+    print(f"Stage 1 Inference: Testing p = {p_values}")
+    print(f"Total available parameters: {len(sorted_keys_all)}")
+    print('='*60)
+    # Store results for each p value
+    all_results = {}
+
+    for p_val in p_values:
+        print(f"\n{'#'*60}")
+        print(f"Running Stage 1 with p = {p_val}")
+        print('#'*60)
+
+        # Reset network params and set only top p_val as inferred
+        reset_network_params_to_inferred()
+        # Restore the sampled theta values (reset_network_params_to_inferred sets all to 0.25)
+        set_network_params_from_normalized(theta_true, param_order_list_full)
+        set_top_p_params_inferred(sorted_keys_all, p_val)
+
+        # Get the inferred param order for this p
+        param_order_list, _ = get_inferred_param_order()
+        print(f"Inferring {p_val} network parameters")
+
+        # Get selected keys for this p (top p_val from sorted_keys_all)
+        selected_keys = sorted_keys_all[:p_val]
+
+        # Get true params and compute clean transfer function
+        params_flat = get_true_param_flat()
+        cable_lengths, load_params, _ = build_params_from_flat(params_flat, param_order_list)
+        H_clean = calculate_Hnw_nofault(cable_lengths, load_params)
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+
+        # Initialize results storage for this p
+        rmse_results = {key: [] for key in selected_keys}
+        crlb_results = {key: [] for key in selected_keys}
+
+        # SNR sweep
+        for snr_db in snr_dbs:
+            print(f"\n{'='*50}")
+            print(f"p = {p_val} | SNR = {snr_db} dB")
+            print('='*50)
+
+            snr_lin = 10.0 ** (snr_db / 10.0)
+            var_f = sigpow / snr_lin
+            std_f = torch.sqrt(var_f / 2)
+
+            # Compute CRLB for this SNR
+            try:
+                crlb_dict = compute_real_CRLB(var_f, selected_keys, sensitivities_all[:p_val], scenario)
+
+                # Run Monte Carlo for RMSE
+                mse_dict = calculate_mse_monte_carlo(
+                    var_f, selected_keys, snr_db, M, num_steps, scenario,
+                    params_flat, param_order_list, p_val
+                )
+
+                print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse_dict.items()})
+                print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_dict.items()})
+
+                # Store results
+                for key in selected_keys:
+                    if key in mse_dict and key in crlb_dict:
+                        rmse_results[key].append(math.sqrt(mse_dict[key]))
+                        crlb_results[key].append(math.sqrt(crlb_dict[key]))
+
+            except Exception as e:
+                print(f"Error at p={p_val}, SNR={snr_db}: {e}")
+                # Fill with NaN if computation fails (e.g., singular FIM)
+                for key in selected_keys:
+                    rmse_results[key].append(float('nan'))
+                    crlb_results[key].append(float('nan'))
+
+        # Plot RMSE vs CRLB for this p value
+        plot_rmse_vs_crlb_snr_sweep(
+            snr_dbs, rmse_results, crlb_results, selected_keys, scenario,
+            is_bayesian=False, M=M,
+            filename=f"stage1_rmse_vs_crlb_p{p_val}_{scenario}.pdf"
+        )
+
+        # Run one more inference at best SNR for convergence plots
+        best_snr = max(snr_dbs)
+        snr_lin = 10.0 ** (best_snr / 10.0)
+        var_f = sigpow / snr_lin
+        std_f = torch.sqrt(var_f / 2)
+
+        H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
+                     1j * std_f * torch.randn_like(H_clean.imag)
+        H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
+
+        losses, best_params, param_history = run_inference(
+            H1_noisy, model_no_fault, guide, selected_keys, std_f, best_snr, num_steps, 0, 1
+        )
+        posterior_means = extract_posterior_means(best_params)
+
+        # Plot convergence and CI for this p
+        plot_param_convergence(
+            param_history, posterior_means, best_snr, losses, selected_keys,
+            f"{scenario}_p{p_val}"
+        )
+        plot_CI_and_pred_TF(best_params, best_snr, f"{scenario}_p{p_val}", is_Bayesian=False)
+
+        # Store all results for this p
+        all_results[p_val] = {
+            'rmse_results': rmse_results,
+            'crlb_results': crlb_results,
+            'selected_keys': selected_keys
+        }
+
+    # Create combined plot showing top-3 parameters across all p values
+    plot_stage1_p_comparison(snr_dbs, all_results, p_values)
+
+    return all_results
+
+
+def plot_stage1_p_comparison(snr_dbs, all_results, p_values):
+    """
+    Create a comparison plot showing how RMSE vs CRLB changes with different p values.
+    Shows top 3 most sensitive parameters.
+    """
+    # Get top 3 keys (same across all p since they're sorted by sensitivity)
+    top_keys = all_results[p_values[0]]['selected_keys'][:3]
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    colors = plt.cm.viridis(np.linspace(0, 1, len(p_values)))
+
+    for idx, key in enumerate(top_keys):
+        ax = axes[idx]
+
+        for p_idx, p_val in enumerate(p_values):
+            if key in all_results[p_val]['rmse_results']:
+                rmse_vals = all_results[p_val]['rmse_results'][key]
+                crlb_vals = all_results[p_val]['crlb_results'][key]
+
+                ax.plot(snr_dbs, rmse_vals, 'o-', color=colors[p_idx],
+                       label=f'RMSE (p={p_val})', markersize=4)
+                ax.plot(snr_dbs, crlb_vals, '--', color=colors[p_idx],
+                       label=f'√CRLB (p={p_val})', linewidth=1.5)
+
+        ax.set_xlabel('SNR (dB)')
+        ax.set_ylabel('Error')
+        ax.set_title(key, fontsize=10)
+        ax.set_yscale('log')
+        ax.grid(True, alpha=0.3)
+        ax.legend(fontsize=6, ncol=2)
+
+    fig.suptitle(f'Stage 1: RMSE vs √CRLB for Different p Values (M={M})', fontsize=12)
+    plt.tight_layout()
+
+    filename = f"stage1_p_comparison_{freq_range_str}.pdf"
+    if OUTPUT_DIR:
+        filename = os.path.join(OUTPUT_DIR, filename)
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"Saved: {filename}")
+    plt.close()
+
+
 def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
     """
     Run the complete two-stage inference workflow:
@@ -3184,7 +3407,13 @@ def run_two_stage_inference(snr_dbs, num_steps_stage1, num_steps_stage2):
 
     H_clean = calculate_Hnw_nofault(cable_lengths, load_params) #[F]
     sigpow = torch.mean(torch.abs(H_clean)**2)
-
+    # plt.plot(freq_range_mhz, 20 * torch.log10(torch.abs(H_clean)).cpu().numpy())
+    # plt.xlabel("Frequency (MHz)")
+    # plt.ylabel("|H| (dB)")
+    # plt.title("Network Transfer Function (No Fault)")
+    # plt.grid(True)
+    # plt.show()
+    # adad
     snr_db = 20
     print(f"\n{'='*50}")
     print(f"SNR = {snr_db} dB for Stage 1 Network Parameter Calibration")
@@ -3289,10 +3518,12 @@ if __name__ == '__main__':
     # Create output folder for all plots
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"\n=== Output folder: {OUTPUT_DIR} ===")
-
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [40]
-    run_two_stage_inference(snr_dbs, num_steps_stage1=2000, num_steps_stage2=500)
+    results = run_stage1_inference(snr_dbs, num_steps=500)
+
+
+    # run_two_stage_inference(snr_dbs, num_steps_stage1=2000, num_steps_stage2=500)
 
     print("My program took", time.time() - start_time, "to run")
 
@@ -3313,55 +3544,55 @@ if __name__ == '__main__':
     # all_thetas = beta_dist.sample((M, p))
     # print(f"Generated {M} theta samples for Monte Carlo (seed={seed})")
     # print("all thetas", all_thetas)
-    # Determine bad seeds (or use empty list with restricted [0.3, 0.7] range)
+    # # Determine bad seeds (or use empty list with restricted [0.3, 0.7] range)
     # bad_seed_indices = determine_bad_seeds_at_40dB(selected_s1, all_thetas)
-    # Hardcoded bad seeds from bad_seed_detection_40dB.csv (seed=98, 149khz-10mhz, M=100, range [0,1])
-    # With range [0.3, 0.7], expect no bad seeds
+    # # Hardcoded bad seeds from bad_seed_detection_40dB.csv (seed=98, 149khz-10mhz, M=100, range [0,1])
+    # # With range [0.3, 0.7], expect no bad seeds
     # bad_seed_indices = []
     # selected_s1, sorted_keys_s1, sensitivities = perform_global_sensitivity_analysis(cable_lengths, load_params)
-    #selected_s1 = []
+    # selected_s1 = []
 
-    # === DEBUG: Plot NLL landscape for a problematic theta ===
-    # Uncomment to visualize loss landscape for specific theta values
-    # Case 1: fault in 0-0.5 range
-    # network_params["fault_parameters"]["fault_position"]["value"] = 0.2704
-    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.6258
-    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.7766
+#    #  === DEBUG: Plot NLL landscape for a problematic theta ===
+#     Uncomment to visualize loss landscape for specific theta values
+#     Case 1: fault in 0-0.5 range
+#     network_params["fault_parameters"]["fault_position"]["value"] = 0.2704
+#     network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.6258
+#     network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.7766
 
-    # Case 2: fault in 0.5-1.0 range
-    # network_params["fault_parameters"]["fault_position"]["value"] = 0.8436
-    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5186
-    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.5581
+#     Case 2: fault in 0.5-1.0 range
+#     network_params["fault_parameters"]["fault_position"]["value"] = 0.8436
+#     network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5186
+#     network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.5581
 
-    # Case 3: Confirmed Bad seed
-    # network_params["fault_parameters"]["fault_position"]["value"] = 0.2089
-    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5640
-    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3487
+#     Case 3: Confirmed Bad seed
+#     network_params["fault_parameters"]["fault_position"]["value"] = 0.2089
+#     network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.5640
+#     network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3487
 
-    # Case 4: Trial 17 bad seed (high L1, low Zr)
-    # network_params["fault_parameters"]["fault_position"]["value"] = 0.7008
-    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.2864
-    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3368
+#     Case 4: Trial 17 bad seed (high L1, low Zr)
+#     network_params["fault_parameters"]["fault_position"]["value"] = 0.7008
+#     network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.2864
+#     network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.3368
 
-    # network_params["fault_parameters"]["fault_position"]["value"] = 0.761504
-    # network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.499150
-    # network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.53396588
-    # plot_nll_vs_L1_complex_mtl(40)
-    # plot_nll_vs_ZFre_complex_mtl(40)
-    # plot_nll_vs_ZFim_complex_mtl(40)
-    # exit()  # Stop after plotting
-    # === END DEBUG ===
+#     network_params["fault_parameters"]["fault_position"]["value"] = 0.761504
+#     network_params["fault_parameters"]["Z_fault_real"]["value"] = 0.499150
+#     network_params["fault_parameters"]["Z_fault_imag"]["value"] = 0.53396588
+#     plot_nll_vs_L1_complex_mtl(40)
+#     plot_nll_vs_ZFre_complex_mtl(40)
+#     plot_nll_vs_ZFim_complex_mtl(40)
+#     exit()  # Stop after plotting
+#     === END DEBUG ===
     
-    #plot_nll_vs_L1_complex_mtl(40.0)
-    #plot_nll_vs_ZFre_complex_mtl(40.0)
-    #plot_nll_vs_ZFim_complex_mtl(40.0)
+#     plot_nll_vs_L1_complex_mtl(40.0)
+#     plot_nll_vs_ZFre_complex_mtl(40.0)
+#     plot_nll_vs_ZFim_complex_mtl(40.0)
     
-    #jacobians, csm = compute_jacobian_cosine_similarity(
+    # jacobians, csm = compute_jacobian_cosine_similarity(
     #    selected_s1, scenario='no_fault'
-    #)
-    #p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
+    # )
+    # p, selected_s1 = remove_correlated_parameters(selected_s1, csm)
 
-    #snr_dbs = [40]
+    # snr_dbs = [40]
     # snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     # #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     # rmse_results = {key: [] for key in selected_s1}
