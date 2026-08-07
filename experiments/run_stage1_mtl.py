@@ -531,10 +531,12 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    #snr_dbs = [30, 35]
     p_values = [10, 30, 50]
     #p_values = [10]
     scenario = "no_fault"
-    mode = "frequentist" 
+    #mode = "frequentist" 
+    mode = "bayesian"
 
     num_steps = 500
 
