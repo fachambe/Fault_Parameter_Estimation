@@ -1,0 +1,39 @@
+# Simple Network Configuration (3-parameter model: L1, ZF, ZL)
+# Single transmission line with fault impedance
+general:
+  seed: 5692
+  device: "cuda"
+
+frequencies:
+  start_hz: 2000000      # 2 MHz
+  stop_hz: 10000000      # 10 MHz
+  num_points: 200
+
+cable:
+  L: 1000       # Total cable length in meters
+  Zs: 50        # Source impedance in ohms
+  mat_file: "experiments/cable_parameters_extended.mat"  # Cable parameters file
+
+experiment:
+  N: 2500                              # Number of observations
+  snr_dbs: [0, 5, 10, 15, 20, 25, 30, 35, 40]
+  target: "ALL3SP"                     # ALL3SP (frequentist) or ALL3DP (Bayesian)
+
+fixed:
+  L1: 250.0
+  ZF: {re: 100.0, im: -50.0}
+  ZL: {re: 100.0, im: -5.0}
+
+parameter_ranges:
+  L1: {min: 1.0, max: 999.0}           # Fault position (max should be L - 1)
+  ZF:
+    re: {min: 1.0, max: 4000.0}
+    im: {min: -100.0, max: 100.0}
+  ZL:
+    re: {min: 1.0, max: 400.0}
+    im: {min: -100.0, max: 100.0}
+
+inference:
+  optimizer: "Adam"
+  learning_rate: 0.01
+  num_steps: 2000

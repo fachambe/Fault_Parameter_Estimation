@@ -23,7 +23,7 @@ from core.likelihoods import ComplexGaussianLik
 from core.crlb import crlb_for_1_real_param
 from estimators.mle_gradient import GradientMLE
 from data.manager import DatasetManager
-from utils.experiment import fmt_freq
+from config.simple_config_loader import fmt_freq
 
 # =============================================================================
 # EXPERIMENT CONFIGURATION (self-contained, no yaml dependency)

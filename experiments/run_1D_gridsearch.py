@@ -13,14 +13,14 @@ import torch
 from core.likelihoods import ComplexGaussianLik
 from core.crlb import crlb_for_1_real_param
 from estimators.mle_gridsearch import GridSearchMLE
-from utils.experiment import setup_experiment, config_hash
+from config.simple_config_loader import load_config, config_hash
 
 
-def main(cfg_path="configs/benchmark.yaml", quant_err=0.05, max_mem_gb=4.0):
+def main(cfg_path="config/simple_network_config.yaml", quant_err=0.05, max_mem_gb=4.0):
     start_time = time.perf_counter()
 
     # Setup experiment (loads config, creates FM/DM)
-    exp = setup_experiment(cfg_path)
+    exp = load_config(cfg_path)
     print(f"Device: {exp['device']}")
     print(f"Config: {exp['freq_tag']}, {exp['L_tag']}, N={exp['N']}, seed={exp['seed']}")
 
@@ -187,7 +187,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run 1D grid search MLE benchmark")
     parser.add_argument("--quant-err", type=float, default=0.05, help="Target quantization error")
     parser.add_argument("--mem", type=float, default=4.0, help="Max GPU memory in GB")
-    parser.add_argument("--cfg", type=str, default="configs/benchmark.yaml")
+    parser.add_argument("--cfg", type=str, default="config/simple_network_config.yaml")
     args = parser.parse_args()
 
     main(cfg_path=args.cfg, quant_err=args.quant_err, max_mem_gb=args.mem)

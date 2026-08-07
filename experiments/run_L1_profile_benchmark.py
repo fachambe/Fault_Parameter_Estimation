@@ -23,7 +23,7 @@ from core.likelihoods import ComplexGaussianLik
 from core.crlb import complex_partials_fullbatch, fim_from_complex_jac, get_CRLB
 from estimators.L1_profile import L1ProfileMLE
 from data.manager import DatasetManager
-from utils.experiment import fmt_freq
+from config.simple_config_loader import fmt_freq
 
 # =============================================================================
 # EXPERIMENT CONFIGURATION (self-contained, no yaml dependency)

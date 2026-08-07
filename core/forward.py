@@ -1,5 +1,8 @@
 import torch
 import numpy as np
+"""
+2-conductor Transmission Line (TL) Model
+"""
 class ForwardModel:
     def __init__(self, gamma, Zc, L, Zs, device=None):
         self.gamma = gamma

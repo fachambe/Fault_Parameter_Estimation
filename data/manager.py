@@ -12,7 +12,7 @@ class DatasetManager:
         target=None, fixed=None, gen_cfg=None
     ):
         """
-        Generate N CTF observations.
+        Generate N CTF observations for simple TL model. 
 
         Args:
             snr_db: Signal-to-noise ratio in dB

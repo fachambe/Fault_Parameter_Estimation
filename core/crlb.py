@@ -372,3 +372,288 @@ def crlb_for_target_estimate(du_aug: torch.Tensor,
         return 1.0 / I22
     else:
         raise ValueError(f"Unknown target: {target}")
+
+
+# ============================================================================
+# MTL Network CRLB Functions (for 100+ parameter network)
+# ============================================================================
+
+def compute_real_FIM_mtl(var_f, scenario, wrapper_fn, get_true_param_flat_fn):
+    """
+    Compute Real Fisher Information Matrix for normalized theta in [0, 1].
+
+    g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately)
+    p = number of parameters (inputs)
+    f = number of frequencies (outputs)
+
+    Args:
+        var_f: Noise variance (determined by SNR) [] if white noise (constant)
+            or [F] if frequency dependent
+        scenario: "no_fault" or "with_fault" (for logging/reference only)
+        wrapper_fn: Forward model wrapper function (H_nofault_wrapper or H_fault_wrapper)
+        get_true_param_flat_fn: Function that returns flat tensor of true params
+
+    Returns:
+        I: FIM [p, p] in param_order_list order
+    """
+    params_flat = get_true_param_flat_fn()
+
+    # Compute Jacobian dH/dtheta
+    J = jacfwd(wrapper_fn)(params_flat)  # [F, 2, P]
+    Delta = J[:, 0, :] + 1j * J[:, 1, :]  # ∂g/∂θ [F, P] complex
+    Delta_tilde = J[:, 0, :] - 1j * J[:, 1, :]  # ∂g*/∂θ = (∂g/∂θ)^* for real θ [F, P] complex
+
+    Delta = Delta.unsqueeze(-1)         # [F, P, 1]
+    Delta_tilde = Delta_tilde.unsqueeze(-1)  # [F, P, 1]
+    # Δ_f ⊗ Δ̃_f^T + Δ̃_f ⊗ Δ_f^T = 2*Re(Δ⊗Δᴴ) which is real
+    I_f = (Delta @ Delta_tilde.transpose(-1, -2)) + (Delta_tilde @ Delta.transpose(-1, -2))  # [F, P, P]
+    # FIM should be real - take real part (imag should be ~0 due to numerics)
+    I = ((1 / var_f) * I_f.sum(dim=0)).real  # [P, P] real and should be symmetric + PSD
+    return I
+
+
+def compute_real_CRLB(var_f, sorted_keys, sensitivities, scenario,
+                      wrapper_fn, get_true_param_flat_fn, get_inferred_param_order_fn):
+    """
+    Compute real FIM and CRLB for P inferred real parameters. We use pseudoinverse so works when FIM is singular. 
+
+    g = H(θ): ℝᴾ → ℂᶠ  (or ℝ²ᶠ treating real/imag separately)
+    P = number of parameters (inputs)
+    F = number of frequencies (outputs)
+
+    Note FIM and CRLB are normalized here.
+    Uses float64 precision for numerical stability.
+
+    Args:
+        var_f: Noise variance
+        sorted_keys: Sorted parameter keys
+        sensitivities: Sensitivity values corresponding to sorted_keys
+        scenario: "no_fault" or "with_fault"
+        wrapper_fn: Forward model wrapper function (H_nofault_wrapper or H_fault_wrapper)
+        get_true_param_flat_fn: Function that returns flat tensor of true params
+        get_inferred_param_order_fn: Function that returns (param_order_list, num_params)
+
+    Returns:
+        crlb_dict: Dict mapping parameter keys to Cramér-Rao Lower Bounds
+    """
+    import math
+
+    param_order_list, _ = get_inferred_param_order_fn()
+    I = compute_real_FIM_mtl(var_f, scenario, wrapper_fn, get_true_param_flat_fn)  # [p, p] Normalized FIM in [0, 1] space
+    eigvals, _ = torch.linalg.eigh(I)
+    print("Eigvals of FIM (descending)", torch.sort(eigvals, descending=True).values)
+    eigvals = torch.sort(eigvals, descending=True).values
+    lambda_max = eigvals[0]
+    lambda_min = eigvals[-1]
+    condition_number = lambda_max / lambda_min
+    print("condition number", condition_number)
+
+    J_pinv_torch = torch.linalg.pinv(I)
+    CRLB_U1U1T = torch.diag(J_pinv_torch)
+
+    # Build mapping from param_order_list index to sorted_keys key
+    def param_order_to_key(entry):
+        """Convert param_order_list entry to sorted_keys format."""
+        param_type, name1, name2 = entry
+        if param_type == "cable":
+            return name1  # e.g., "l_w_4"
+        elif param_type == "load":
+            return f"{name1}.{name2}"  # e.g., "load_1.C_s"
+        elif param_type == "fault_param":
+            return name1
+
+    # Create mapping: key -> index in param_order_list.
+    key_to_idx = {param_order_to_key(param_order_list[i]): i for i in range(len(param_order_list))}
+
+    print("=" * 220)
+    print(f"{'Idx':<5} {'Parameter':<22} {'Sens':<10} {'CRLB U1U1T':<14} {'Unc U1U1T':<10}")
+    print("-" * 220)
+
+    # Build dicts sorted by sorted_keys order
+    crlb_u1u1t_dict = {}  # key -> CRLB value
+    # Print in sorted_keys order
+    for index, key in enumerate(sorted_keys):
+        if key not in key_to_idx:
+            continue
+        i = key_to_idx[key]
+        sens = sensitivities[index]
+        crlb_u1u1t = CRLB_U1U1T[i].item()
+        crlb_u1u1t_dict[key] = crlb_u1u1t
+        uncert_u1u1t_pct = math.sqrt(crlb_u1u1t) * 100
+
+        print(f"{i:<5} {key:<22} {sens:<10} {crlb_u1u1t:<14.2e} {uncert_u1u1t_pct:>5.2f}%")
+
+    print("=" * 220)
+    return crlb_u1u1t_dict
+
+
+# ============================================================================
+# Bayesian CRLB Functions (for MTL network)
+# ============================================================================
+
+def beta_prior_fim_closed_form(alpha, p):
+    """
+    Closed form prior FIM for Beta(α,α) priors.
+
+    For Beta(α,α) prior, the Fisher information for each parameter is:
+    J_π = 4 * (2α - 1) * (α - 1) / (α - 2)
+
+    Args:
+        alpha: Beta distribution hyperparameter (must be > 2)
+        p: Number of parameters
+
+    Returns:
+        J_pi: [p, p] diagonal prior FIM
+    """
+    if alpha <= 2:
+        raise ValueError("alpha must be > 2 for finite FIM")
+
+    j_pi_scalar = 4 * (2 * alpha - 1) * (alpha - 1) / (alpha - 2)
+    J_pi = j_pi_scalar * torch.eye(p)  # Diagonal
+    return J_pi
+
+
+def key_to_tuple(key, network_params):
+    """
+    Convert parameter key string to tuple format used in param_order_list.
+
+    Args:
+        key: Parameter key string, e.g.:
+            - 'l_w_4' (cable parameter)
+            - 'load_1.C_m_leak' (load parameter)
+            - 'fault_position' (fault parameter)
+        network_params: Network parameters dict (to check fault_parameters)
+
+    Returns:
+        tuple: Parameter tuple in format:
+            - ('cable', 'l_w_4', None)
+            - ('load', 'load_1', 'C_m_leak')
+            - ('fault_param', 'fault_position', None)
+    """
+    if '.' in key:
+        # Load parameter: 'load_1.C_m_leak' → ('load', 'load_1', 'C_m_leak')
+        parts = key.split('.')
+        return ('load', parts[0], parts[1])
+    elif key in network_params.get("fault_parameters", {}):
+        # Fault parameter: 'fault_position' → ('fault_param', 'fault_position', None)
+        return ('fault_param', key, None)
+    else:
+        # Cable parameter: 'l_w_4' → ('cable', 'l_w_4', None)
+        return ('cable', key, None)
+
+
+def compute_expected_data_fim(snr_db, all_thetas, scenario, forward_model,
+                               wrapper_fn, get_true_param_flat_fn,
+                               get_inferred_param_order_fn,
+                               set_network_params_from_normalized_fn,
+                               build_params_from_flat_fn):
+    """
+    Compute E_π[I(θ)] via Monte Carlo.
+
+    Args:
+        snr_db: SNR in dB
+        all_thetas: Pre-generated theta samples [M, p]
+        scenario: "no_fault" or "with_fault"
+        forward_model: MTLForwardModel instance
+        wrapper_fn: Forward model wrapper function
+        get_true_param_flat_fn: Function that returns flat tensor of true params
+        get_inferred_param_order_fn: Function that returns (param_order_list, num_params)
+        set_network_params_from_normalized_fn: Function to set network params from normalized values
+        build_params_from_flat_fn: Function to build params from flat tensor
+
+    Returns:
+        E_I: Expected data FIM [p, p]
+    """
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    num_samples = all_thetas.shape[0]
+    num_params = all_thetas.shape[1]
+
+    # Accumulate FIMs
+    E_I = torch.zeros(num_params, num_params)
+    param_order_list, _ = get_inferred_param_order_fn()
+
+    for m in range(num_samples):
+        print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
+        set_network_params_from_normalized_fn(all_thetas[m], param_order_list)
+
+        # Compute H_clean for this theta
+        cable_lengths, load_params, fault_params = build_params_from_flat_fn(
+            get_true_param_flat_fn(), param_order_list
+        )
+        if scenario == "with_fault":
+            H_clean = forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)
+        else:
+            H_clean = forward_model.calculate_Hnw_nofault(cable_lengths, load_params)
+
+        # Compute var_f for this theta
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+        var_f = sigpow / snr_lin
+
+        # Compute FIM at this theta
+        I_phi = compute_real_FIM_mtl(var_f, scenario, wrapper_fn, get_true_param_flat_fn)
+
+        E_I += I_phi
+
+    E_I /= num_samples
+    return E_I
+
+
+def compute_real_BCRLB(snr_db, selected_keys, all_thetas, scenario, alpha,
+                        forward_model, network_params,
+                        wrapper_fn, get_true_param_flat_fn,
+                        get_inferred_param_order_fn,
+                        set_network_params_from_normalized_fn,
+                        build_params_from_flat_fn):
+    """
+    Compute Bayesian CRLB assuming beta prior with hyperparameter alpha.
+
+    Args:
+        snr_db: SNR in dB
+        selected_keys: List of parameter keys to extract (in desired order)
+        all_thetas: Pre-generated theta samples [M, p] (same as used for RMSE)
+        scenario: "no_fault" or "with_fault"
+        alpha: Beta distribution hyperparameter
+        forward_model: MTLForwardModel instance
+        network_params: Network parameters dict
+        wrapper_fn: Forward model wrapper function
+        get_true_param_flat_fn: Function that returns flat tensor of true params
+        get_inferred_param_order_fn: Function that returns (param_order_list, num_params)
+        set_network_params_from_normalized_fn: Function to set network params from normalized values
+        build_params_from_flat_fn: Function to build params from flat tensor
+
+    Returns:
+        bcrlb_dict: {param_name: BCRLB_value} in selected_keys order
+    """
+    _, p = get_inferred_param_order_fn()
+    print(f"Computing BCRLB with p = {p} parameters")
+
+    # Compute E[I(θ)] using same theta samples as RMSE
+    E_I = compute_expected_data_fim(
+        snr_db, all_thetas, scenario, forward_model,
+        wrapper_fn, get_true_param_flat_fn,
+        get_inferred_param_order_fn,
+        set_network_params_from_normalized_fn,
+        build_params_from_flat_fn
+    )
+
+    # Compute J_π (prior FIM)
+    J_pi = beta_prior_fim_closed_form(alpha, p)
+
+    # Bayesian FIM
+    J_B = E_I + J_pi
+
+    # Bayesian CRLB
+    BCRLB = torch.linalg.inv(J_B)
+    bcrlb_diag_full = torch.diag(BCRLB)  # [p] in param_order_list order
+    bcrlb_dict = {}
+    param_order_list, _ = get_inferred_param_order_fn()
+
+    for key in selected_keys:
+        key_tuple = key_to_tuple(key, network_params)
+        if key_tuple in param_order_list:
+            idx = param_order_list.index(key_tuple)
+            bcrlb_dict[key] = bcrlb_diag_full[idx].item()
+        else:
+            print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
+
+    return bcrlb_dict

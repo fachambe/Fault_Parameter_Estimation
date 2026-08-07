@@ -23,14 +23,14 @@ from core.likelihoods import ComplexGaussianLik
 from core.crlb import complex_partials_fullbatch, fim_from_complex_jac, get_CRLB
 from estimators.mle_gradient import GradientMLE
 from data.manager import DatasetManager
-from utils.experiment import fmt_freq
+from config.simple_config_loader import fmt_freq
 
 # =============================================================================
 # EXPERIMENT CONFIGURATION (self-contained, no yaml dependency)
 # =============================================================================
 DEVICE = "cuda"
 Zs = 50.0  # Source impedance (ohms)
-N = 100    # Number of observations
+N = 2500    # Number of observations
 SEED = 5692
 F = 200    # Number of frequency points per scenario
 SNR_DBS = [0,10,20,30,40,50,60,70,80]

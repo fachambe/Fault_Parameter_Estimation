@@ -6,7 +6,6 @@ import pyro.poutine as poutine
 import torch
 import copy
 import math
-import json
 import pandas as pd
 import matplotlib
 #matplotlib.use("Agg")
@@ -34,7 +33,7 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 10 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 1 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 5.0 #Hyperparameter of beta prior
 
@@ -72,13 +71,23 @@ def calculate_receiver_load(Z_RG, Z_R1, Z_R2, Z_R3):
     ])
     return Z_rec
 
-def denormalize(norm_value, min_val, max_val):
+def denormalize(norm_value, min_val, max_val, dist="uniform"):
     """ Convert normalized value (0 to 1) back to its original range. """
-    return norm_value * (max_val - min_val) + min_val
+    if dist == "log":
+        # Log-uniform: value = min * (max/min)^norm_value
+        return min_val * (max_val / min_val) ** norm_value
+    else:
+        # Linear uniform: value = min + norm_value * (max - min)
+        return norm_value * (max_val - min_val) + min_val
 
-def normalize(physical_value, min_val, max_val):
+def normalize(physical_value, min_val, max_val, dist="uniform"):
     """ Convert physical value to normalized [0, 1] range. Inverse of denormalize. """
-    return (physical_value - min_val) / (max_val - min_val)
+    if dist == "log":
+        # Log-uniform: norm = log(value/min) / log(max/min)
+        return torch.log(physical_value / min_val) / torch.log(torch.tensor(max_val / min_val))
+    else:
+        # Linear uniform
+        return (physical_value - min_val) / (max_val - min_val)
 
 def loguniform(low, high, size=None):
     """ Generate samples from a log-uniform distribution. """
@@ -336,13 +345,60 @@ def constant_impedance(R_const, C_leak, omega):
     return Z12, Z13, Z23, ZG1, ZG2, ZG3
 
 # Function to compute double RLC admittance matrix (type 2)
-def double_RLC(R_s, omega_0s, zeta_s, R_p, omega_0p, zeta_p, delta_1, delta_2, C_d_leak, omega):
-    Z12 = (2j * (omega / omega_0p) * R_p * zeta_p) / (1 + 2j * (omega / omega_0p) * R_p * zeta_p - (omega**2 / omega_0p**2))
-    Z12 += R_s + 2j * R_s * zeta_s * ((omega / omega_0s) - (omega_0s / omega))
-    Z13 = Z12 * (1 + delta_1)
-    Z23 = Z12 * (1 + delta_2)
-    ZG1 = ZG2 = ZG3 = 1 / (1j * omega * C_d_leak)
+def double_RLC(R_s, omega_0s, zeta_s, R_p, omega_0p, zeta_p,
+               delta_1, delta_2, C_d_leak, omega):
+    """
+    Compute impedance values for double RLC load (series + parallel RLC).
+
+    The double RLC load consists of:
+    - Series RLC branch with parameters (R_s, omega_0s, zeta_s)
+    - Parallel RLC branch with parameters (R_p, omega_0p, zeta_p)
+    - Asymmetry factors delta_1, delta_2
+    - Leakage capacitance C_d_leak
+
+    Args:
+        R_s: Series resistance. Scalar or [P, 1].
+        omega_0s: Series resonance frequency. Scalar or [P, 1].
+        zeta_s: Series damping factor. Scalar or [P, 1].
+        R_p: Parallel resistance. Scalar or [P, 1].
+        omega_0p: Parallel resonance frequency. Scalar or [P, 1].
+        zeta_p: Parallel damping factor. Scalar or [P, 1].
+        delta_1: Asymmetry factor 1. Scalar or [P, 1].
+        delta_2: Asymmetry factor 2. Scalar or [P, 1].
+        C_d_leak: Leakage capacitance. Scalar or [P, 1].
+        omega: Angular frequencies [F].
+
+    Returns:
+        Z12, Z13, Z23, ZG1, ZG2, ZG3: Impedance values.
+            Shape [F] or [P, F] depending on input.
+    """
+    x_s = omega / omega_0s
+    x_p = omega / omega_0p
+
+    # Series RLC impedance
+    Z_series = (
+        R_s
+        + 1j * (R_s / (2.0 * zeta_s))
+        * (x_s - 1.0 / x_s)
+    )
+
+    # Parallel RLC impedance
+    Z_parallel = (
+        2j * R_p * zeta_p * x_p
+        / (1.0 + 2j * zeta_p * x_p - x_p**2)
+    )
+
+    Z12 = Z_series + Z_parallel
+    Z13 = Z12 * (1.0 + delta_1)
+    Z23 = Z12 * (1.0 + delta_2)
+
+    Z_ground = 1.0 / (1j * omega * C_d_leak)
+    ZG1 = Z_ground
+    ZG2 = Z_ground
+    ZG3 = Z_ground
+
     return Z12, Z13, Z23, ZG1, ZG2, ZG3
+
 
 # Function to compute motor load admittance matrix (type 3)
 def motor_load(C_m, L_m, R_m1, R_m2, C_m_leak, omega):
@@ -405,17 +461,17 @@ def generate_load_parameters_deterministic(num_loads):
 
         if load_type == 1:  # Constant Impedance (2)
             network_params["loads"][f"load_{i}"] = {
-                "R_const": {"value": 0.25, "inferred": True, "range": (10, 200)},
+                "R_const": {"value": 0.25, "inferred": True, "range": (10, 200), "dist": "log"},
                 "C_leak": {"value": 0.25, "inferred": True, "range": (0.1e-9, 2.0e-9)}
             }
             total_parameters += 2
 
         elif load_type == 2:  # Double RLC (9)
             network_params["loads"][f"load_{i}"] = {
-                "R_s": {"value": 0.25, "inferred": True, "range": (10, 3000)},
+                "R_s": {"value": 0.25, "inferred": True, "range": (10, 3000), "dist": "log"},
                 "omega_0s": {"value": 0.25, "inferred": True, "range": (0.1e6, 30e6)},
                 "zeta_s": {"value": 0.25, "inferred": True, "range": (0.1, 2)},
-                "R_p": {"value": 0.25, "inferred": True, "range": (10, 3000)},
+                "R_p": {"value": 0.25, "inferred": True, "range": (10, 3000), "dist": "log"},
                 "omega_0p": {"value": 0.25, "inferred": True, "range": (0.1e6, 30e6)},
                 "zeta_p": {"value": 0.25, "inferred": True, "range": (0.1, 2)},
                 "delta_1": {"value": 0.25, "inferred": True, "range": (-0.1, 0.1)},
@@ -778,8 +834,10 @@ def calculate_Hnw_nofault(cable_lengths, load_params):
             if param_name == 'R_m2': #R_m2 is just kept as 5 since it's not inferred
                 load_params_physical[load_name][param_name] = norm_val
             else:
-                lo, hi = network_params["loads"][load_name][param_name]["range"]
-                load_params_physical[load_name][param_name] = lo + norm_val * (hi - lo)
+                param_info = network_params["loads"][load_name][param_name]
+                lo, hi = param_info["range"]
+                dist = param_info.get("dist", "uniform")
+                load_params_physical[load_name][param_name] = denormalize(norm_val, lo, hi, dist)
     
     lo, hi = network_params["conductor_radii"]["r_w_servicepanel"]["range"]
     r_w_servicepanel = denormalize(network_params["conductor_radii"]["r_w_servicepanel"]["value"], lo, hi)
@@ -914,8 +972,10 @@ def calculate_Hnw(cable_lengths, load_params, fault_params):
             if param_name == 'R_m2': #R_m2 is just kept as 5 since it's not inferred
                 load_params_physical[load_name][param_name] = norm_val
             else:
-                lo, hi = network_params["loads"][load_name][param_name]["range"]
-                load_params_physical[load_name][param_name] = lo + norm_val * (hi - lo)
+                param_info = network_params["loads"][load_name][param_name]
+                lo, hi = param_info["range"]
+                dist = param_info.get("dist", "uniform")
+                load_params_physical[load_name][param_name] = denormalize(norm_val, lo, hi, dist)
     
     lo, hi = network_params["conductor_radii"]["r_w_servicepanel"]["range"]
     r_w_servicepanel = denormalize(network_params["conductor_radii"]["r_w_servicepanel"]["value"], lo, hi)
@@ -1760,10 +1820,10 @@ def compute_real_CRLB(var_f, sorted_keys, sensitivities, scenario):
 
     Returns:
         CRLB_U1U1T: [P] Dict of Cramér-Rao Lower Bounds for alpha = U1U1^T theta
-        CRLB_S2: [] depends on span of null space but will be < P. Dict of Cramér-Rao Lower Bounds for alpha = S2 theta
     """
     param_order_list, _ = get_inferred_param_order()
     I = compute_real_FIM(var_f, scenario)  # [p, p] Normalized FIM in [0, 1] space
+    print("I shape", I.shape)
     eigvals, eigvecs = torch.linalg.eigh(I)
     print("Eigvals of FIM (descending)", torch.sort(eigvals, descending=True).values)
     eigvals = torch.sort(eigvals, descending=True).values
@@ -3177,7 +3237,7 @@ def set_top_p_params_inferred(sorted_keys, p_value):
             network_params["cable_lengths"][key]["inferred"] = True
 
 
-def run_stage1_inference(snr_dbs, num_steps, p_values=[10,20,30,40,50]):
+def run_stage1_inference(snr_dbs, num_steps, p_values=[100]):
     """
     Run Stage 1 inference only (network parameters, no fault) with RMSE vs CRLB analysis.
 
@@ -3202,7 +3262,7 @@ def run_stage1_inference(snr_dbs, num_steps, p_values=[10,20,30,40,50]):
     param_order_list_full, p_tot = get_inferred_param_order()
 
     # Sample theta from prior instead of using fixed 0.25
-    torch.manual_seed(SEED)
+    torch.manual_seed(SEED + 1)
     beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
     theta_true = beta_dist.sample((p_tot,))
     set_network_params_from_normalized(theta_true, param_order_list_full)
@@ -3213,6 +3273,7 @@ def run_stage1_inference(snr_dbs, num_steps, p_values=[10,20,30,40,50]):
     print(f"Stage 1 Inference: Testing p = {p_values}")
     print(f"Total available parameters: {len(sorted_keys_all)}")
     print('='*60)
+    
     # Store results for each p value
     all_results = {}
 
@@ -3257,7 +3318,8 @@ def run_stage1_inference(snr_dbs, num_steps, p_values=[10,20,30,40,50]):
             # Compute CRLB for this SNR
             try:
                 crlb_dict = compute_real_CRLB(var_f, selected_keys, sensitivities_all[:p_val], scenario)
-
+                # print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_dict.items()})
+                # ada
                 # Run Monte Carlo for RMSE
                 mse_dict = calculate_mse_monte_carlo(
                     var_f, selected_keys, snr_db, M, num_steps, scenario,
@@ -3513,13 +3575,12 @@ if __name__ == '__main__':
     print(f"Total number of fault parameters: {num_fault_params}")
     print(f"Total number of network parameters: {total_params + num_cable_params + num_fault_params}")
     print(f"Load type distribution: {load_types}")
-    
 
     # Create output folder for all plots
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"\n=== Output folder: {OUTPUT_DIR} ===")
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-    #snr_dbs = [40]
+    snr_dbs = [40]
     results = run_stage1_inference(snr_dbs, num_steps=500)
 
 

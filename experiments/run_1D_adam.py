@@ -13,14 +13,14 @@ import torch
 from core.likelihoods import ComplexGaussianLik
 from core.crlb import crlb_for_1_real_param
 from estimators.mle_gradient import GradientMLE
-from utils.experiment import setup_experiment, config_hash
+from config.simple_config_loader import load_config, config_hash
 
 
-def main(cfg_path="configs/benchmark.yaml", adam_steps=2000, adam_lr=1e-2):
+def main(cfg_path="config/simple_network_config.yaml", adam_steps=2000, adam_lr=1e-2):
     start_time = time.perf_counter()
 
     # Setup experiment (loads config, creates FM/DM)
-    exp = setup_experiment(cfg_path)
+    exp = load_config(cfg_path)
     print(f"Device: {exp['device']}")
     print(f"Config: {exp['freq_tag']}, {exp['L_tag']}, N={exp['N']}, seed={exp['seed']}")
     print(f"Adam steps: {adam_steps}, learning rate: {adam_lr}")
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run 1D Adam MLE benchmark")
     parser.add_argument("--adam-steps", type=int, default=2000, help="Number of Adam steps")
     parser.add_argument("--adam-lr", type=float, default=1e-2, help="Adam learning rate")
-    parser.add_argument("--cfg", type=str, default="configs/benchmark.yaml", help="Config file path")
+    parser.add_argument("--cfg", type=str, default="config/simple_network_config.yaml", help="Config file path")
     args = parser.parse_args()
 
     main(cfg_path=args.cfg, adam_steps=args.adam_steps, adam_lr=args.adam_lr)

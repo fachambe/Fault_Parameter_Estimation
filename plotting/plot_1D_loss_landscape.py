@@ -672,7 +672,7 @@ def analyze_freq_impact_on_loss(fm, fixed, pul_freq_full, gamma_full, Zc_full,
     print(f"Tested {len(freq_ranges)} frequency ranges with L1_true={L1_true_val:.1f} m, SNR={snr_db} dB")
 
 
-def main(cfg_path="configs/benchmark.yaml", snr_db=40,
+def main(cfg_path="config/simple_network_config.yaml", snr_db=40,
          save_dir="figures/plot_loss_landscapes"):
     """Main function to plot all loss landscape analyses."""
     cfg = yaml.safe_load(open(cfg_path))
@@ -753,7 +753,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot loss landscapes")
     parser.add_argument("--snr", type=int, default=40, help="SNR in dB")
-    parser.add_argument("--cfg", type=str, default="configs/benchmark.yaml", help="Config file path")
+    parser.add_argument("--cfg", type=str, default="config/simple_network_config.yaml", help="Config file path")
     parser.add_argument("--save-dir", type=str, default="figures/plot_loss_landscapes", help="Save directory")
     args = parser.parse_args()
 

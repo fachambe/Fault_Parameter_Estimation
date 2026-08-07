@@ -9,18 +9,16 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 import torch
 
-from utils.experiment import setup_experiment, config_hash
+from config.simple_config_loader import load_config, config_hash
 
 
-def main(cfg_path="configs/benchmark.yaml"):
+def main(cfg_path="config/simple_network_config.yaml"):
     start_time = time.perf_counter()
     torch.set_printoptions(precision=8, sci_mode=False)
-
     # Setup experiment (loads config, creates FM/DM)
-    exp = setup_experiment(cfg_path)
+    exp = load_config(cfg_path)
     print(f"Device: {exp['device']}")
     print(f"Config: {exp['freq_tag']}, {exp['L_tag']}, N={exp['N']}, seed={exp['seed']}")
-
     # Config dict for observation data (for hashing)
     obs_config = {
         "freq_start": exp["fstart"], "freq_stop": exp["fend"], "F": exp["F"],
@@ -80,7 +78,7 @@ def main(cfg_path="configs/benchmark.yaml"):
         print(f"  Saved to {obs_file}")
 
     end_time = time.perf_counter()
-    print(f"\nGenerated observations for {len(exp['snrs'])} SNR values in {end_time - start_time:.2f} seconds")
+    print(f"\nGenerated {exp["N"]} CTF observations for {len(exp['snrs'])} SNR values in {end_time - start_time:.2f} seconds")
 
 
 if __name__ == "__main__":
