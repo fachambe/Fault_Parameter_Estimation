@@ -609,7 +609,7 @@ def main():
         print('='*50)
         if snr_db <= 20:
             num_steps = 250
-        else
+        else:
             num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
