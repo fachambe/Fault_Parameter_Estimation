@@ -26,9 +26,9 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
-ALPHA = 5.0 #Hyperparameter of beta prior
+ALPHA = 3.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
     3,  # load_0 R6-O3  Motor
@@ -571,6 +571,7 @@ def main():
         print(f"\n{'#'*60}")
         print(f"Running Stage 1 with p = {p_val}")
         print('#'*60)
+
         theta_bayesian = beta_dist.sample((M, p_val)) #Every Monte Carlo run has diff theta for bayesian RMSE and BCRLB
 
         # Set theta_true values and enable only top p_val params for inference
@@ -600,10 +601,14 @@ def main():
             print(f"\n{'='*50}")
             print(f"p = {p_val} | SNR = {snr_db} dB | Mode = {mode}")
             print('='*50)
+            if snr_db <= 20:
+                num_steps = 250
+            else:
+                num_steps = 500
 
             snr_lin = 10.0 ** (snr_db / 10.0)
             var_f = sigpow / snr_lin
-            wrapper_fn = H_nofault_wrapper if scenario == "no_fault" else H_fault_wrapper
+            wrapper_fn = H_nofault_wrapper #always no fault for stage 1
 
             if mode == "frequentist":
                 # Frequentist: fixed θ_true, CRLB
@@ -693,8 +698,11 @@ def main():
         elif param_type == "fault_param":
             key = name1  # e.g., 'fault_position'
         theta_true_dict[key] = theta_true[i].item()
+    #  Extract fault_position range for filename
+    fp_range = network_params["fault_parameters"]["fault_position"]["range"]
+    fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage1_results_{freq_range_str}_M{M}_{mode}.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage1_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),

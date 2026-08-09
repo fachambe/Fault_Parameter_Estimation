@@ -616,7 +616,6 @@ def main():
         var_f = sigpow / snr_lin
         wrapper_fn = H_fault_wrapper  # Stage 2 always uses fault model
 
-        # Compute sensitivities for fault params only (for CRLB computation)
         sensitivities = [1.0 / p_fault] * p_fault  # Equal weights for fault params
 
         if mode == "frequentist":
