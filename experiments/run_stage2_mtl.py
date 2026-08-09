@@ -28,7 +28,7 @@ VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses mor
 SEED = 98 #Seed for theta_true for Bayesian Results
 M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
-ALPHA = 3.0 #Hyperparameter of beta prior
+ALPHA = 5.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
     3,  # load_0 R6-O3  Motor
@@ -555,8 +555,8 @@ def main():
     #snr_dbs = [30, 35]
     #snr_dbs = [40]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
-    mode = "frequentist"
-    #mode = "bayesian"
+    #mode = "frequentist"
+    mode = "bayesian"
 
     num_steps = 500
 
@@ -580,7 +580,7 @@ def main():
     print('='*60)
 
     # Sample fault parameter values from prior
-    torch.manual_seed(SEED)
+    torch.manual_seed(SEED-1)
     beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
     theta_true = beta_dist.sample((p_fault,))
     set_network_params_from_normalized(theta_true, param_order_list)
@@ -688,7 +688,11 @@ def main():
             key = name1  # e.g., 'fault_position'
             theta_true_dict[key] = theta_true[i].item()
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_{mode}.npz")
+    # Extract fault_position range for filename
+    fp_range = network_params["fault_parameters"]["fault_position"]["range"]
+    fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
+
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
@@ -702,6 +706,7 @@ def main():
         SEED=SEED,
         scenario=scenario,
         freq_range_str=freq_range_str,
+        fp_range=np.array(fp_range),
         mode=mode,
         **results_to_save
     )
