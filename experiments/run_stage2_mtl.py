@@ -558,7 +558,6 @@ def main():
     #mode = "frequentist"
     mode = "bayesian"
 
-    num_steps = 500
 
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
     num_cable_params = len(network_params["cable_lengths"])
@@ -608,6 +607,10 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
+        if snr_db <= 20:
+            num_steps = 250
+        else
+            num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
