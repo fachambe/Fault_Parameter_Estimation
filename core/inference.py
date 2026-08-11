@@ -319,7 +319,8 @@ class SVIEngine:
         m=0,
         M=1,
         p_val=None,
-        verbose=True
+        verbose=True,
+        fault_position_init=0.0
     ):
         """
         Run SVI inference.
@@ -335,6 +336,8 @@ class SVIEngine:
             M: Total Monte Carlo trials (for logging)
             p_val: Number of inferred parameters (for logging)
             verbose: Whether to print progress
+            fault_position_init: Initial loc value for fault_position (pre-sigmoid).
+                0.0 -> sigmoid(0) = 0.5, -1.386 -> 0.2, 1.386 -> 0.8
 
         Returns:
             losses: List of ELBO losses at each step
@@ -375,6 +378,12 @@ class SVIEngine:
 
         # Initialize guide parameters
         self.guide(H1_noisy, std_f)
+
+        # Override fault_position initialization if specified
+        if fault_position_init != 0.0:
+            param_store = pyro.get_param_store()
+            if "fault_position_loc" in param_store:
+                param_store["fault_position_loc"].data.fill_(fault_position_init)
 
         if verbose:
             param_store = pyro.get_param_store()

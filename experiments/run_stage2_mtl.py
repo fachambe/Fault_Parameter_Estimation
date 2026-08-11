@@ -3,6 +3,7 @@ import time
 import math
 import os
 import numpy as np
+import matplotlib.pyplot as plt
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import torch
 from torch.func import jacfwd
@@ -28,7 +29,7 @@ VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses mor
 SEED = 98 #Seed for theta_true for Bayesian Results
 M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
-ALPHA = 5.0 #Hyperparameter of beta prior
+ALPHA = 3.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
     3,  # load_0 R6-O3  Motor
@@ -110,7 +111,7 @@ network_params = {
     "fault_parameters": {
         # Normalized position [0.3, 0.7], will be scaled to [0.3L, 0.7L] in forward model
         # For Stage 1 (no fault): inferred=False. For Stage 2: inferred=True.
-        "fault_position": {"value": 0.25, "inferred": False, "range": (0.1, 0.9)},
+        "fault_position": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
         # Complex fault impedance Z_fault = Z_fault_real + j*Z_fault_imag
         "Z_fault_real": {"value": 0.1, "inferred": False, "range": (0.0, 1000.0)},
         "Z_fault_imag": {"value": 0.25, "inferred": False, "range": (-100.0, 100.0)}
@@ -412,6 +413,84 @@ def perform_local_sensitivity_analysis(scenario):
 
     return selected, sorted_params, sensitivities
 
+
+def plot_loss_landscape_fault_position(H_noisy, std_f, theta_true_normalized, param_order_list,
+                                        snr_db, m, num_points=200):
+    """
+    Plot the negative log-likelihood landscape w.r.t. fault_position,
+    with Z_fault_real and Z_fault_imag fixed at their true values.
+
+    Args:
+        H_noisy: Noisy observation [1, F, 2] (real view)
+        std_f: Noise standard deviation
+        theta_true_normalized: True normalized parameters [p]
+        param_order_list: Parameter order list
+        snr_db: SNR in dB (for filename)
+        m: Monte Carlo run index (for filename)
+        num_points: Number of points to sweep
+    """
+    # Get true values for Z_fault_real and Z_fault_imag
+    # param_order_list for Stage 2: [('fault_param', 'fault_position', None),
+    #                                 ('fault_param', 'Z_fault_real', None),
+    #                                 ('fault_param', 'Z_fault_imag', None)]
+    true_fp = theta_true_normalized[0].item()
+    true_zfr = theta_true_normalized[1].item()
+    true_zfi = theta_true_normalized[2].item()
+
+    # Convert H_noisy back to complex
+    H_noisy_complex = H_noisy[0, :, 0] + 1j * H_noisy[0, :, 1]  # [F]
+
+    # Sweep fault_position
+    fp_values = torch.linspace(0.01, 0.99, num_points, device=device)
+    neg_log_likelihoods = []
+
+    # Get current cable_lengths and load_params (these are fixed)
+    cable_lengths, load_params, _ = build_params_from_flat(get_true_param_flat(), param_order_list)
+
+    var_f = 2 * std_f**2  # Noise variance
+
+    for fp in fp_values:
+        # Create fault_params with swept fault_position but true Z_fault values
+        fault_params = {
+            'fault_position': fp,
+            'Z_fault_real': torch.tensor(true_zfr, device=device),
+            'Z_fault_imag': torch.tensor(true_zfi, device=device)
+        }
+
+        # Compute predicted H
+        H_pred = forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)  # [F] complex
+
+        # Compute negative log-likelihood: (1/2σ²) * ||H_noisy - H_pred||²
+        residual = H_noisy_complex - H_pred
+        nll = (1 / var_f) * torch.sum(torch.abs(residual)**2).item()
+        neg_log_likelihoods.append(nll)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(fp_values.numpy(), neg_log_likelihoods, 'b-', linewidth=1.5)
+    ax.axvline(x=true_fp, color='r', linestyle='--', linewidth=2, label=f'True position = {true_fp:.4f}')
+    ax.axvline(x=0.5, color='g', linestyle=':', linewidth=2, label='SVI init = 0.5')
+
+    # Mark the minimum
+    min_idx = np.argmin(neg_log_likelihoods)
+    min_fp = fp_values[min_idx].item()
+    ax.axvline(x=min_fp, color='orange', linestyle='-', linewidth=2, label=f'Min at = {min_fp:.4f}')
+
+    ax.set_xlabel('Fault Position (normalized)', fontsize=12)
+    ax.set_ylabel('Negative Log-Likelihood', fontsize=12)
+    ax.set_title(f'Loss Landscape: SNR={snr_db}dB, m={m+1}\n'
+                 f'Z_fault_real={true_zfr:.4f}, Z_fault_imag={true_zfi:.4f} (fixed at true)', fontsize=11)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    # Save figure
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    save_path = os.path.join(OUTPUT_DIR, f'loss_landscape_snr{snr_db}_m{m+1}.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Loss landscape saved to: {save_path}")
+
+
 def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_steps, scenario, p_val=None):
     """
     Compute Bayesian MSE via Monte Carlo at specific SNR.
@@ -456,11 +535,48 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_st
                     1j * std_f * torch.randn_like(H_clean.imag)
         H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
 
-        # 2. Run SVI inference
-        _, best_params, _ = svi_engine.run_inference(
-            H1_noisy, scenario, selected_keys, std_f, num_steps,
-            snr_db=snr_db, m=m, M=M, p_val=p_val
-        )
+        # Plot loss landscape
+        # plot_loss_landscape_fault_position(
+        #         H1_noisy, std_f, theta_true_normalized, param_order_list,
+        #         snr_db, m
+        # )
+        
+        # 2. Run SVI inference (multi-start for high SNR to escape local minima)
+        if snr_db >= 20:
+            # Multi-start: run from 3 different fault_position inits
+            # sigmoid(0.0)=0.5, sigmoid(-1.386)≈0.2, sigmoid(1.386)≈0.8
+            init_values = [0.0, -1.386, 1.386]
+            best_loss = float('inf')
+            best_params = None
+            for init_val in init_values:
+                losses, params, _ = svi_engine.run_inference(
+                    H1_noisy, scenario, selected_keys, std_f, num_steps,
+                    snr_db=snr_db, m=m, M=M, p_val=p_val,
+                    #verbose=True,
+                    verbose=(init_val == 0.0),  # Only print for first init
+                    fault_position_init=init_val
+                )
+                final_loss = losses[-1] if losses else float('inf')
+                if final_loss < best_loss:
+                    best_loss = final_loss
+                    best_params = params
+            print(f"  Multi-start: best loss = {best_loss:.2f}")
+            # Print best params vs true values
+            for key in selected_keys:
+                store_key = key.replace(".", "_") + "_loc"
+                if store_key in best_params:
+                    loc = best_params[store_key]
+                    if hasattr(loc, 'detach'):
+                        loc = loc.detach().item()
+                    estimate = 1 / (1 + math.exp(-loc))  # sigmoid
+                    true_val = svi_engine.get_true_param_value(key)
+                    print(f"    {key:20s}: estimate = {estimate:.4f} | true = {true_val:.4f}")
+        else:
+            # Single run for low SNR
+            _, best_params, _ = svi_engine.run_inference(
+                H1_noisy, scenario, selected_keys, std_f, num_steps,
+                snr_db=snr_db, m=m, M=M, p_val=p_val
+            )
 
         # 3. Extract posterior means for this run
         posterior_means = svi_engine.extract_posterior_means(best_params)
@@ -553,10 +669,11 @@ def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     #snr_dbs = [30, 35]
-    #snr_dbs = [40]
+    #snr_dbs = [0]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
+    num_steps = 250
 
 
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
@@ -607,10 +724,10 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
-        if snr_db <= 20:
-            num_steps = 250
-        else:
-            num_steps = 500
+        # if snr_db <= 20:
+        #     num_steps = 250
+        # else:
+        #     num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin

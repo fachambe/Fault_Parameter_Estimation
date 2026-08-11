@@ -49,7 +49,7 @@ def load_stage2_results(npz_path):
     return dict(data), results
 
 
-def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, output_dir=None, mode="frequentist"):
+def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, fp_range, output_dir=None, mode="frequentist"):
     """
     Plot RMSE vs CRLB for the 3 fault parameters in a 1x3 layout.
 
@@ -58,6 +58,8 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, output_d
         results: Dict with 'selected_keys', 'rmse_results', 'crlb_results'
         M: Number of Monte Carlo trials
         freq_range_str: Frequency range string for filename
+        alpha: alpha for beta prior (bayeisan only)
+        fp_range: Fault position param range
         output_dir: Output directory for saving plots
         mode: "frequentist" or "bayesian" - affects labels
     """
@@ -105,14 +107,13 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, output_d
 
         ax.set_xlabel('SNR (dB)', fontsize=11)
         ax.set_ylabel('Error (normalized)', fontsize=11)
-        ax.set_title(display_names.get(key, key), fontsize=12)
         ax.set_yscale('log')
         ax.grid(True, which='both', linestyle='--', alpha=0.5)
         ax.legend(fontsize=9)
 
     plt.tight_layout()
 
-    filename = f"stage2_fault_rmse_crlb_{freq_range_str}_{mode}.pdf"
+    filename = f"stage2_fault_rmse_crlb_{freq_range_str}_{mode}_{alpha}_{fp_range}.pdf"
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
@@ -293,7 +294,6 @@ def plot_CI_grid_stage2(data, snr_dbs_to_plot, freq_range_str, output_dir=None, 
         ax.set_xscale('log')
         ax.set_xlabel('Frequency (MHz)', fontsize=10)
         ax.set_ylabel(r'$H_{1,1}$ (dB)', fontsize=10)
-        ax.set_title(f'SNR = {snr_db} dB', fontsize=10)
         ax.grid(True, which='both', linestyle='--', alpha=0.5)
 
     # Hide unused subplots
@@ -336,8 +336,11 @@ def main():
     M = int(data['M'])
     freq_range_str = str(data['freq_range_str'])
     selected_keys = results['selected_keys']
+    alpha = data['ALPHA']
+    #fp_range = data['fp_range']
+    fp_range = [0.1, 0.9]
 
-    # Detect mode from npz (default to frequentist for backward compatibility)
+    # Detect mode from npz 
     mode = str(data['mode']) if 'mode' in data else "frequentist"
 
     # Fixed output directory
@@ -354,7 +357,7 @@ def main():
     print("\nGenerating plots...")
 
     # 1. RMSE vs CRLB for fault parameters
-    plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, output_dir, mode)
+    plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, fp_range, output_dir, mode)
 
     # 2. TF Confidence Interval grid plots (frequentist mode only)
     if mode == "bayesian":
