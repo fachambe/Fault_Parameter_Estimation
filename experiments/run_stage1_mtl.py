@@ -110,7 +110,7 @@ network_params = {
     "fault_parameters": {
         # Normalized position [0.3, 0.7], will be scaled to [0.3L, 0.7L] in forward model
         # For Stage 1 (no fault): inferred=False. For Stage 2: inferred=True.
-        "fault_position": {"value": 0.25, "inferred": False, "range": (0.3, 0.7)},
+        "fault_position": {"value": 0.25, "inferred": False, "range": (0.0, 1.0)},
         # Complex fault impedance Z_fault = Z_fault_real + j*Z_fault_imag
         "Z_fault_real": {"value": 0.1, "inferred": False, "range": (0.0, 1000.0)},
         "Z_fault_imag": {"value": 0.25, "inferred": False, "range": (-100.0, 100.0)}
