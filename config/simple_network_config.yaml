@@ -27,7 +27,7 @@ fixed:
 parameter_ranges:
   L1: {min: 1.0, max: 999.0}           # Fault position (max should be L - 1)
   ZF:
-    re: {min: 1.0, max: 4000.0}
+    re: {min: 1.0, max: 1000.0}
     im: {min: -100.0, max: 100.0}
   ZL:
     re: {min: 1.0, max: 400.0}

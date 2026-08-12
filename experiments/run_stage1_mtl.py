@@ -535,8 +535,8 @@ def main():
     p_values = [10, 30, 50]
     #p_values = [10]
     scenario = "no_fault"
-    #mode = "frequentist" 
-    mode = "bayesian"
+    mode = "frequentist" 
+    #mode = "bayesian"
 
     num_steps = 500
 

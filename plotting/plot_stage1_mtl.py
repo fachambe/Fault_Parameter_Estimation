@@ -11,6 +11,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+from matplotlib.lines import Line2D
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -56,85 +57,154 @@ def load_stage1_results(npz_path):
     return dict(data), all_results
 
 
-def plot_stage1_p_comparison(snr_dbs, all_results, p_values, M, freq_range_str, output_dir=None, mode="frequentist"):
-    """
-    Create a comparison plot showing how RMSE vs CRLB changes with different p values.
-    Shows top 8 most sensitive parameters.
+def plot_stage1_p_comparison(
+    snr_dbs,
+    all_results,
+    p_values,
+    M,
+    freq_range_str,
+    output_dir=None,
+    mode="frequentist"
+):
 
-    Args:
-        snr_dbs: Array of SNR values in dB
-        all_results: Dict with structure {p_val: {'selected_keys': [...], 'rmse_results': {...}, 'crlb_results': {...}}}
-        p_values: Array of p values tested
-        M: Number of Monte Carlo trials
-        freq_range_str: Frequency range string for filename
-        output_dir: Output directory for saving plots
-        mode: "frequentist" or "bayesian" - affects labels
-    """
-    panel_labels = ["(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)", "(h)"]
-    panel = 0
+    panel_labels = ["(a)", "(b)", "(c)", "(d)"]
 
-    # Labels depend on mode
     if mode == "bayesian":
-        rmse_label = "Bayes RMSE"
-        crlb_label = "√BCRLB"
+        rmse_label = "BRMSE"
+        crlb_label = r"$\sqrt{\mathrm{BCRLB}}$"
     else:
         rmse_label = "RMSE"
-        crlb_label = "√CRLB"
+        crlb_label = r"$\sqrt{\mathrm{CRLB}}$"
 
-    # Get top 8 keys (same across all p since they're sorted by sensitivity)
-    top_keys = all_results[p_values[0]]['selected_keys'][:8]
+    top_keys = all_results[p_values[0]]["selected_keys"][:4]
 
-    fig, axes = plt.subplots(4, 2, figsize=(10, 10))
+    # Colorblind-friendly, high-contrast colors
+    colors = {
+        10: "#0072B2",   # blue
+        30: "#D55E00",   # vermillion
+        50: "#009E73",   # green
+    }
+
+    fig, axes = plt.subplots(
+        2, 2,
+        figsize=(11.5, 8.0),
+        sharex=True
+    )
     axes = axes.flatten()
-    colors = plt.cm.viridis(np.linspace(0, 1, len(p_values)))
 
     for idx, key in enumerate(top_keys):
         ax = axes[idx]
 
-        # Panel label
-        ax.text(
-            0.5, 1.05,
-            panel_labels[panel],
-            transform=ax.transAxes,
-            ha="center",
-            va="bottom",
-            fontsize=12,
+        for p_val in p_values:
+            if key not in all_results[p_val]["rmse_results"]:
+                continue
+
+            rmse_vals = all_results[p_val]["rmse_results"][key]
+            crlb_vals = all_results[p_val]["crlb_results"][key]
+
+            # RMSE
+            ax.plot(
+                snr_dbs,
+                rmse_vals,
+                color=colors[p_val],
+                linestyle='-',
+                linewidth=1.8
+            )
+
+            # CRLB
+            ax.plot(
+                snr_dbs,
+                crlb_vals,
+                color=colors[p_val],
+                linestyle="--",
+                linewidth=1.8,
+            )
+
+        ax.set_xlabel("SNR (dB)", fontsize=15)
+        ax.set_ylabel("Normalized Error", fontsize=15)
+
+        ax.tick_params(axis="both",which="major",labelsize=12,direction="in"
         )
-        panel += 1
 
-        for p_idx, p_val in enumerate(p_values):
-            if key in all_results[p_val]['rmse_results']:
-                rmse_vals = all_results[p_val]['rmse_results'][key]
-                crlb_vals = all_results[p_val]['crlb_results'][key]
+        ax.grid(True, which="major", linestyle="--", linewidth=0.6, alpha=0.35)
 
-                ax.plot(snr_dbs, rmse_vals, 'o-', color=colors[p_idx],
-                       label=f'{rmse_label} (p={p_val})', markersize=4)
-                ax.plot(snr_dbs, crlb_vals, '--', color=colors[p_idx],
-                       label=f'{crlb_label} (p={p_val})', linewidth=1.5)
+        # Cleaner panel labels
+        ax.text(0.5, 1.025,panel_labels[idx],transform=ax.transAxes,ha="center",va="bottom",fontsize=16
+        )
 
-        ax.set_xlabel('SNR (dB)')
-        ax.set_ylabel('Error')
-        #ax.set_yscale('log')
-        #ax.grid(False)
-        ax.grid(True, which='both',linestyle='--',alpha=0.5)
-        ax.legend(fontsize=6, ncol=2)
+        # Slightly thicker axes
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.8)
 
-    #fig.suptitle(f'Stage 1 ({title_suffix}): {rmse_label} vs {crlb_label} for Different p Values (M={M})', fontsize=12)
-    plt.tight_layout()
+    # ---------- Figure-level legend ----------
 
-    filename = f"stage1_p_comparison_{freq_range_str}_{mode}.pdf"
+    # p-value colors
+    p_handles = [Line2D([0], [0], color=colors[p], linewidth=2, label=rf"$p={p}$")
+        for p in p_values
+    ]
+
+    # RMSE / CRLB line styles
+    type_handles = [
+        Line2D(
+            [0], [0],
+            color="black",
+            linestyle="-",
+            marker="o",
+            markersize=4.5,
+            linewidth=1.8,
+            label=rmse_label
+        ),
+        Line2D(
+            [0], [0],
+            color="black",
+            linestyle="--",
+            linewidth=1.8,
+            label=crlb_label
+        )
+    ]
+
+    handles = p_handles + type_handles
+
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.995),
+        ncol=5,
+        fontsize=13,
+        frameon=False
+    )
+
+    fig.subplots_adjust(
+        top=0.90,
+        bottom=0.10,
+        left=0.09,
+        right=0.98,
+        hspace=0.30,
+        wspace=0.25
+    )
+
+    filename = (
+        f"stage1_p_comparison_M{M}_"
+        f"{freq_range_str}_{mode}.pdf"
+    )
+
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
+
+    plt.savefig(
+        filename,
+        bbox_inches="tight"
+    )
+    plt.close(fig)
     print(f"Saved: {filename}")
-    plt.close()
+
 
 
 def plot_rmse_vs_crlb_all_params(snr_dbs, all_results, p_val, M, freq_range_str,
                                   num_params_to_plot=10, output_dir=None, mode="frequentist"):
     """
-    Plot RMSE vs CRLB for top N parameters at a specific p value.
+    Plot RMSE vs CRLB for top 10 parameters at a specific p value.
 
     Args:
         snr_dbs: Array of SNR values in dB
@@ -150,21 +220,19 @@ def plot_rmse_vs_crlb_all_params(snr_dbs, all_results, p_val, M, freq_range_str,
     if mode == "bayesian":
         rmse_label = "Bayes RMSE"
         crlb_label = "√BCRLB"
-        title_suffix = "Bayesian"
     else:
         rmse_label = "RMSE"
         crlb_label = "√CRLB"
-        title_suffix = "Frequentist"
 
     selected_keys = all_results[p_val]['selected_keys'][:num_params_to_plot]
     rmse_results = all_results[p_val]['rmse_results']
     crlb_results = all_results[p_val]['crlb_results']
 
     n_params = len(selected_keys)
-    ncols = min(5, n_params)
-    nrows = (n_params + ncols - 1) // ncols
+    ncols = 2
+    nrows = 5
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4*ncols, 3.5*nrows))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(10, 10), sharex=True)
     axes = np.atleast_2d(axes).flatten()
 
     for idx, key in enumerate(selected_keys):
@@ -187,14 +255,14 @@ def plot_rmse_vs_crlb_all_params(snr_dbs, all_results, p_val, M, freq_range_str,
     for idx in range(n_params, len(axes)):
         axes[idx].set_visible(False)
 
-    fig.suptitle(f'Stage 1 ({title_suffix}): {rmse_label} vs {crlb_label} (p={p_val}, M={M})', fontsize=12)
+    #fig.suptitle(f'Stage 1 ({title_suffix}): {rmse_label} vs {crlb_label} (p={p_val}, M={M})', fontsize=12)
     plt.tight_layout()
 
-    filename = f"stage1_rmse_crlb_p{p_val}_{freq_range_str}_{mode}.pdf"
+    filename = f"stage1_rmse_crlb_p{p_val}_M{M}_{freq_range_str}_{mode}.pdf"
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
-    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
     print(f"Saved: {filename}")
     plt.close()
 
@@ -312,7 +380,7 @@ def compute_tf_posterior_ci(data, p_val, snr_db, num_samples=500, device='cpu'):
     return tf_mean, tf_lower, tf_upper, H_clean_db, freq_range_mhz
 
 
-def plot_CI_grid(data, p_val, snr_dbs_to_plot, freq_range_str, output_dir=None, num_samples=200):
+def plot_CI_grid(data, p_val, M, snr_dbs_to_plot, freq_range_str, output_dir=None, num_samples=200):
     """
     Plot transfer function CI for multiple SNR values in a grid layout.
 
@@ -321,6 +389,7 @@ def plot_CI_grid(data, p_val, snr_dbs_to_plot, freq_range_str, output_dir=None, 
     Args:
         data: Dict from np.load with allow_pickle=True
         p_val: Number of inferred parameters
+        M: Num of Monte carlo samples
         snr_dbs_to_plot: List of SNR values to plot (e.g., [0, 5, 10, 15, 20, 25, 30, 35])
         freq_range_str: Frequency range string for filename
         output_dir: Output directory
@@ -369,7 +438,7 @@ def plot_CI_grid(data, p_val, snr_dbs_to_plot, freq_range_str, output_dir=None, 
     plt.tight_layout()
     fig.subplots_adjust(bottom=0.08)  # Make room for legend
 
-    filename = f"stage1_tf_ci_grid_p{p_val}_{freq_range_str}.pdf"
+    filename = f"stage1_tf_ci_grid_p{p_val}_M{M}_{freq_range_str}.pdf"
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
@@ -411,6 +480,9 @@ def main():
     print(f"  Frequency range: {freq_range_str}")
     print(f"  Total parameters: {len(sorted_keys_all)}")
     print(f"  Mode: {mode}")
+    print(f"\nTop 4 most sensitive parameters:")
+    for i, key in enumerate(sorted_keys_all[:4]):
+        print(f"  {i+1}. {key}")
 
     # Generate plots
     print("\nGenerating plots...")
@@ -423,17 +495,17 @@ def main():
         plot_rmse_vs_crlb_all_params(snr_dbs, all_results, p_val, M, freq_range_str,
                                       num_params_to_plot=min(10, p_val), output_dir=output_dir, mode=mode)
 
-    # 3. TF Confidence Interval grid plots (frequentist mode only)
-    if mode == "bayesian":
-        print("\nSkipping CI plots (not available for bayesian mode)")
-    else:
-        print("\nGenerating TF confidence interval grid plots...")
-        # Plot SNR 0-40 dB in 5x2 grid to show reconstruction improvement
-        snr_dbs_for_ci = [snr for snr in [0, 5, 10, 15, 20, 25, 30, 35] if snr in snr_dbs]
-        for p_val in p_values:
-            plot_CI_grid(data, p_val, snr_dbs_for_ci, freq_range_str, output_dir, num_samples=CI_SAMPLES)
+    # # 3. TF Confidence Interval grid plots (frequentist mode only)
+    # if mode == "bayesian":
+    #     print("\nSkipping CI plots (not available for bayesian mode)")
+    # else:
+    #     print("\nGenerating TF confidence interval grid plots...")
+    #     # Plot SNR 0-40 dB in 5x2 grid to show reconstruction improvement
+    #     snr_dbs_for_ci = [snr for snr in [0, 5, 10, 15, 20, 25, 30, 35] if snr in snr_dbs]
+    #     for p_val in p_values:
+    #         plot_CI_grid(data, p_val, M, snr_dbs_for_ci, freq_range_str, output_dir, num_samples=CI_SAMPLES)
 
-    print("\nDone!")
+    # print("\nDone!")
 
 
 if __name__ == "__main__":

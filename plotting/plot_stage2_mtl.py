@@ -67,7 +67,7 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
 
     # Labels depend on mode
     if mode == "bayesian":
-        rmse_label = "Bayes RMSE"
+        rmse_label = "BRMSE"
         crlb_label = r"$\sqrt{\mathrm{BCRLB}}$"
     else:
         rmse_label = "RMSE"
@@ -77,12 +77,6 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
     rmse_results = results['rmse_results']
     crlb_results = results['crlb_results']
 
-    # Nice display names for fault parameters
-    display_names = {
-        'fault_position': 'Fault Position',
-        'Z_fault_real': r'$Z_{\mathrm{fault}}$ (Real)',
-        'Z_fault_imag': r'$Z_{\mathrm{fault}}$ (Imag)',
-    }
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
@@ -337,8 +331,7 @@ def main():
     freq_range_str = str(data['freq_range_str'])
     selected_keys = results['selected_keys']
     alpha = data['ALPHA']
-    #fp_range = data['fp_range']
-    fp_range = [0.1, 0.9]
+    fp_range = data['fp_range']
 
     # Detect mode from npz 
     mode = str(data['mode']) if 'mode' in data else "frequentist"

@@ -542,7 +542,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_st
         # )
         
         # 2. Run SVI inference (multi-start for high SNR to escape local minima)
-        if snr_db >= 20:
+        if snr_db >= 10:
             # Multi-start: run from 3 different fault_position inits
             # sigmoid(0.0)=0.5, sigmoid(-1.386)≈0.2, sigmoid(1.386)≈0.8
             init_values = [0.0, -1.386, 1.386]
@@ -724,10 +724,11 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
-        # if snr_db <= 20:
-        #     num_steps = 250
-        # else:
-        #     num_steps = 500
+        # At high SNR, loss landscape is sharper and needs more steps to converge
+        if snr_db <= 30:
+            num_steps = 250
+        else:
+            num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
