@@ -26,7 +26,7 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 1 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
@@ -531,9 +531,9 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-    snr_dbs = [0]
+    #snr_dbs = [0]
     p_values = [10, 30, 50]
-    p_values = [50]
+    #p_values = [50]
     scenario = "no_fault"
     mode = "frequentist" 
     #mode = "bayesian"
