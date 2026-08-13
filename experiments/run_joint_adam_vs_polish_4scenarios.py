@@ -34,9 +34,9 @@ N = 2500    # Number of observations
 SEED = 5692
 F = 200    # Number of frequency points per scenario
 SNR_DBS = [0,10,20,30,40,50,60,70,80]
-
+SNR_DBS = [0]
 # Parameter ranges for ZF and ZL (used in true_range)
-ZF_RANGE = {"re": {"min": 1.0, "max": 4000.0}, "im": {"min": -100.0, "max": 100.0}}
+ZF_RANGE = {"re": {"min": 1.0, "max": 1000.0}, "im": {"min": -100.0, "max": 100.0}}
 ZL_RANGE = {"re": {"min": 1.0, "max": 400.0}, "im": {"min": -100.0, "max": 100.0}}
 
 # 4 scenarios: 2 freq ranges x 2 cable lengths

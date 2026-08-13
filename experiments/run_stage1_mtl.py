@@ -551,7 +551,8 @@ def main():
     
     # Get param order for all parameters
     param_order_list_full, p_tot = get_inferred_param_order()
-    # Sample theta from prior instead of using fixed 0.25
+
+    # One fixed network realization used for sensitivity analysis / frequentist truth - override 0.25 for all
     torch.manual_seed(SEED + 1)
     beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
     theta_true = beta_dist.sample((p_tot,))
@@ -559,6 +560,14 @@ def main():
 
     # Perform sensitivity analysis at sampled theta
     _, sorted_keys_all, sensitivities_all = perform_local_sensitivity_analysis(scenario)
+
+    # Common Bayesian prior draws used across p = 10, 30, 50
+    p_max = max(p_values)
+    top50_keys = sorted_keys_all[:p_max]
+
+    # Column j corresponds to top50_keys[j]
+    theta_bayesian_full = beta_dist.sample((M, p_max))
+
     print(f"\n{'='*60}")
     print(f"Stage 1 Inference: Testing p = {p_values}")
     print(f"Total available parameters: {len(sorted_keys_all)}")
@@ -571,11 +580,9 @@ def main():
         print(f"\n{'#'*60}")
         print(f"Running Stage 1 with p = {p_val}")
         print('#'*60)
-
-        theta_bayesian = beta_dist.sample((M, p_val)) #Every Monte Carlo run has diff theta for bayesian RMSE and BCRLB
-
-        # Set theta_true values and enable only top p_val params for inference
+        # Reset ALL network parameters to the same baseline realization
         set_network_params_from_normalized(theta_true, param_order_list_full)
+        # Enable only top p parameters
         set_top_p_params_inferred(sorted_keys_all, p_val)
 
         # Get the inferred param order for this p
@@ -585,6 +592,33 @@ def main():
         # Get selected keys for this p (top p_val from sorted_keys_all)
         selected_keys = sorted_keys_all[:p_val]
 
+        # Map physical parameter key -> its column in theta_bayesian_full
+        key_to_full_col = {
+            key: i for i, key in enumerate(top50_keys)
+        }
+        # Convert current param_order_list to string keys
+        param_order_keys = []
+
+        for ptype, name, subname in param_order_list:
+            if ptype == "cable":
+                key = name
+            elif ptype == "load":
+                key = f"{name}.{subname}"
+            elif ptype == "fault_param":
+                key = name
+
+            param_order_keys.append(key)
+
+        # Pull the SAME Beta draw for each physical parameter,
+        # but arrange columns in the order expected by set_network_params_from_normalized()
+        theta_bayesian = torch.stack(
+            [
+                theta_bayesian_full[:, key_to_full_col[key]]
+                for key in param_order_keys
+            ],
+            dim=1
+        )
+        
         # Get true params and compute clean transfer function
         params_flat = get_true_param_flat()
         cable_lengths, load_params, _ = build_params_from_flat(params_flat, param_order_list)

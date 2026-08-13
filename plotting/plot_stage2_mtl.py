@@ -10,6 +10,7 @@ import os
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogLocator, ScalarFormatter
 import torch
 
 # Add parent directory to path for imports
@@ -80,11 +81,19 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
+    # Scale factors: normalized [0,1] -> physical units
+    # fault_position: 5 backbone cables × 6.25m each = 31.25m
+    # Z_fault_real: range [0, 1000] Ω
+    # Z_fault_imag: range [-100, 100] Ω = 200 Ω width
+    scale = {'fault_position': 31.25, 'Z_fault_real': 1000.0, 'Z_fault_imag': 200.0}
+    units = {'fault_position': r'$L_F$ Error (m)', 'Z_fault_real': r'$Re[Z_F]$ Error ($\Omega$)', 'Z_fault_imag': r'$Im[Z_F]$ Error ($\Omega$)'}
+
     for idx, key in enumerate(selected_keys):
         ax = axes[idx]
 
-        rmse_vals = rmse_results[key]
-        crlb_vals = crlb_results[key]
+        s = scale.get(key, 1.0)
+        rmse_vals = rmse_results[key] * s
+        crlb_vals = crlb_results[key] * s
 
         # Panel label
         ax.text(
@@ -96,14 +105,21 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
             fontsize=12,
         )
 
-        ax.plot(snr_dbs, rmse_vals, 'bo-', label=rmse_label, markersize=5)
+        ax.plot(snr_dbs, rmse_vals, 'bo-', label=rmse_label, markersize=6)
         ax.plot(snr_dbs, crlb_vals, 'r--', label=crlb_label, linewidth=2)
 
-        ax.set_xlabel('SNR (dB)', fontsize=11)
-        ax.set_ylabel('Error (normalized)', fontsize=11)
+        ax.set_xlabel('SNR (dB)', fontsize=13)
+        ax.set_ylabel(units.get(key, 'Error'), fontsize=13)
         ax.set_yscale('log')
+        # Add more y-axis tick labels on log scale
+        ax.yaxis.set_major_locator(LogLocator(base=10, numticks=10))
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=(2, 3, 5), numticks=10))
+        ax.yaxis.set_minor_formatter(ScalarFormatter())
+        ax.yaxis.minor.formatter.set_scientific(False)
+        ax.tick_params(axis='both', which='major', labelsize=11)
+        ax.tick_params(axis='y', which='minor', labelsize=9)
         ax.grid(True, which='both', linestyle='--', alpha=0.5)
-        ax.legend(fontsize=9)
+        ax.legend(fontsize=10)
 
     plt.tight_layout()
 
@@ -358,7 +374,7 @@ def main():
     else:
         print("\nGenerating TF confidence interval grid plots...")
         snr_dbs_for_ci = [snr for snr in snr_dbs if snr in snr_dbs]
-        plot_CI_grid_stage2(data, snr_dbs_for_ci, freq_range_str, output_dir, num_samples=CI_SAMPLES)
+        #plot_CI_grid_stage2(data, snr_dbs_for_ci, freq_range_str, output_dir, num_samples=CI_SAMPLES)
 
     print("\nDone!")
 
