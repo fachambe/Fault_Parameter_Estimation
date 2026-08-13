@@ -11,7 +11,6 @@ from core.loads import *
 from core.forward_mtl import MTLForwardModel
 from core.crlb import (
     compute_real_CRLB,
-    compute_real_BCRLB,
     beta_prior_fim_closed_form,
     compute_expected_data_fim,
     key_to_tuple,
@@ -19,14 +18,14 @@ from core.crlb import (
 from core.inference import SVIEngine, InferenceConfig
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
-OUTPUT_DIR = "stage_1_results"
+OUTPUT_DIR = "both_stages_results"
 #OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 1 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
@@ -530,16 +529,17 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-    snr_dbs = [0]
-    p_values = [10, 30, 50]
-    p_values = [50]
-    scenario = "no_fault"
-    mode = "frequentist" 
-    #mode = "bayesian"
 
-    num_steps = 500
+    # ==================== STAGE 1 CONFIG ====================
+    snr_db_s1 = 40
+    num_steps_s1 = 1000
 
+    # ==================== STAGE 2 CONFIG ====================
+    snr_dbs_s2 = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    num_steps_s2 = 250
+    M_s2 = 50  # Monte Carlo trials for Stage 2 BRMSE
+
+    # ==================== SETUP ====================
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
     num_cable_params = len(network_params["cable_lengths"])
     num_fault_params = len(network_params["fault_parameters"])
@@ -548,213 +548,243 @@ def main():
     print(f"Total number of fault parameters: {num_fault_params}")
     print(f"Total number of network parameters: {total_params + num_cable_params + num_fault_params}")
     print(f"Load type distribution: {load_types}")
-    
-    # Get param order for all parameters
+
+    # Get param order for all network parameters (Stage 1)
     param_order_list_full, p_tot = get_inferred_param_order()
 
-    # One fixed network realization used for sensitivity analysis / frequentist truth - override 0.25 for all
+    # Sample TRUE theta from prior for network params
     torch.manual_seed(SEED + 1)
     beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
-    theta_true = beta_dist.sample((p_tot,))
-    set_network_params_from_normalized(theta_true, param_order_list_full)
+    theta_true_network = beta_dist.sample((p_tot,))
+    set_network_params_from_normalized(theta_true_network, param_order_list_full)
 
-    # Perform sensitivity analysis at sampled theta
-    _, sorted_keys_all, sensitivities_all = perform_local_sensitivity_analysis(scenario)
+    # Store true network param values (for later comparison)
+    true_network_values = {key: svi_engine.get_true_param_value(key)
+                          for key in [entry[1] if entry[0] == "cable" else f"{entry[1]}.{entry[2]}"
+                                     for entry in param_order_list_full]}
 
-    # Common Bayesian prior draws used across p = 10, 30, 50
-    p_max = max(p_values)
-    top50_keys = sorted_keys_all[:p_max]
-
-    # Column j corresponds to top50_keys[j]
-    theta_bayesian_full = beta_dist.sample((M, p_max))
-
+    # ==================== STAGE 1: Infer Network Params ====================
     print(f"\n{'='*60}")
-    print(f"Stage 1 Inference: Testing p = {p_values}")
-    print(f"Total available parameters: {len(sorted_keys_all)}")
+    print(f"STAGE 1: Inferring {p_tot} network parameters at {snr_db_s1}dB SNR")
     print('='*60)
 
-    # Store results for each p value
-    all_results = {}
+    # Perform sensitivity analysis
+    _, sorted_keys_all, sensitivities_all = perform_local_sensitivity_analysis("no_fault")
+    selected_keys_s1 = sorted_keys_all
 
-    for p_val in p_values:
-        print(f"\n{'#'*60}")
-        print(f"Running Stage 1 with p = {p_val}")
-        print('#'*60)
-        # Reset ALL network parameters to the same baseline realization
-        set_network_params_from_normalized(theta_true, param_order_list_full)
-        # Enable only top p parameters
-        set_top_p_params_inferred(sorted_keys_all, p_val)
+    # Generate clean TF (no fault) and add noise
+    params_flat = get_true_param_flat()
+    cable_lengths, load_params, _ = build_params_from_flat(params_flat, param_order_list_full)
+    H_clean_s1 = forward_model.calculate_Hnw_nofault(cable_lengths, load_params)
+    sigpow_s1 = torch.mean(torch.abs(H_clean_s1)**2)
+    snr_lin_s1 = 10.0 ** (snr_db_s1 / 10.0)
+    var_f_s1 = sigpow_s1 / snr_lin_s1
+    std_f_s1 = torch.sqrt(var_f_s1 / 2)
 
-        # Get the inferred param order for this p
-        param_order_list, _ = get_inferred_param_order()
-        print(f"Inferring {p_val} network parameters")
+    H1_noisy_c = H_clean_s1 + std_f_s1 * torch.randn_like(H_clean_s1.real) + \
+                    1j * std_f_s1 * torch.randn_like(H_clean_s1.imag)
+    H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))  # [1, F, 2]
 
-        # Get selected keys for this p (top p_val from sorted_keys_all)
-        selected_keys = sorted_keys_all[:p_val]
+    # Run SVI inference for Stage 1
+    _, best_params_s1, _ = svi_engine.run_inference(
+        H1_noisy, "no_fault", selected_keys_s1, std_f_s1, num_steps_s1,
+        snr_db=snr_db_s1, m=0, M=1, p_val=p_tot
+    )
 
-        # Map physical parameter key -> its column in theta_bayesian_full
-        key_to_full_col = {
-            key: i for i, key in enumerate(top50_keys)
-        }
-        # Convert current param_order_list to string keys
-        param_order_keys = []
+    # Extract Stage 1 estimates
+    posterior_means_s1 = svi_engine.extract_posterior_means(best_params_s1)
 
-        for ptype, name, subname in param_order_list:
+    # Print Stage 1 results (compare estimates to true values)
+    print(f"\n--- Stage 1 Results (first 10 params) ---")
+    for i, key in enumerate(selected_keys_s1[:10]):
+        true_val = true_network_values[key]
+        est_key = key.replace(".", "_")
+        est_val = posterior_means_s1.get(est_key, float('nan'))
+        error = abs(est_val - true_val)
+        print(f"  {key:20s}: true={true_val:.4f}, est={est_val:.4f}, error={error:.4f}")
+
+    # ==================== TRANSITION: Update network_params with Stage 1 estimates ====================
+    print(f"\n{'='*60}")
+    print("Updating network_params with Stage 1 estimates for Stage 2...")
+    print('='*60)
+
+    # Update network_params with estimated values (these become "fixed" for Stage 2)
+    for entry in param_order_list_full:
+        ptype, name, subname = entry
+        if ptype == "cable":
+            key = name
+            est_key = name
+        elif ptype == "load":
+            key = f"{name}.{subname}"
+            est_key = f"{name}_{subname}"
+        else:
+            continue
+
+        if est_key in posterior_means_s1:
             if ptype == "cable":
-                key = name
+                network_params["cable_lengths"][name]["value"] = posterior_means_s1[est_key]
+                network_params["cable_lengths"][name]["inferred"] = False  # Fixed for Stage 2
             elif ptype == "load":
-                key = f"{name}.{subname}"
-            elif ptype == "fault_param":
-                key = name
+                network_params["loads"][name][subname]["value"] = posterior_means_s1[est_key]
+                network_params["loads"][name][subname]["inferred"] = False  # Fixed for Stage 2
 
-            param_order_keys.append(key)
+    # Enable fault parameters for inference in Stage 2
+    for fault_name in network_params["fault_parameters"]:
+        network_params["fault_parameters"][fault_name]["inferred"] = True
 
-        # Pull the SAME Beta draw for each physical parameter,
-        # but arrange columns in the order expected by set_network_params_from_normalized()
-        theta_bayesian = torch.stack(
-            [
-                theta_bayesian_full[:, key_to_full_col[key]]
-                for key in param_order_keys
-            ],
-            dim=1
-        )
-        
-        # Get true params and compute clean transfer function
-        params_flat = get_true_param_flat()
-        cable_lengths, load_params, _ = build_params_from_flat(params_flat, param_order_list)
-        H_clean = forward_model.calculate_Hnw_nofault(cable_lengths, load_params)
-        sigpow = torch.mean(torch.abs(H_clean)**2)
+    # ==================== STAGE 2: Infer Fault Params (Bayesian) ====================
+    # Get new param order (only fault params now)
+    param_order_list_s2, p_fault = get_inferred_param_order()
+    selected_keys_s2 = [entry[1] for entry in param_order_list_s2]  # fault_position, Z_fault_real, Z_fault_imag
+    print(f"\nSTAGE 2: Inferring {p_fault} fault parameters: {selected_keys_s2}")
 
-        # Initialize results storage for this p
-        rmse_results = {key: [] for key in selected_keys}
-        crlb_results = {key: [] for key in selected_keys}
-        best_params_per_snr = {}  # Store best_params for CI plotting
+    # Sample fault parameter values from prior for Bayesian
+    torch.manual_seed(SEED)
+    theta_bayesian_fault = beta_dist.sample((M_s2, p_fault))
 
-        # SNR sweep
-        for snr_db in snr_dbs:
-            print(f"\n{'='*50}")
-            print(f"p = {p_val} | SNR = {snr_db} dB | Mode = {mode}")
-            print('='*50)
-            if snr_db <= 20:
-                num_steps = 250
+    # Initialize results storage (only BRMSE, BCRLB comes from ideal run_stage2_mtl.py)
+    rmse_results = {key: [] for key in selected_keys_s2}
+
+    # Store estimated network values for restoring after data generation
+    estimated_network_values = {}
+    for entry in param_order_list_full:
+        ptype, name, subname = entry
+        if ptype == "cable":
+            estimated_network_values[name] = network_params["cable_lengths"][name]["value"]
+        elif ptype == "load":
+            estimated_network_values[f"{name}.{subname}"] = network_params["loads"][name][subname]["value"]
+
+    # SNR sweep for Stage 2
+    for snr_db in snr_dbs_s2:
+        print(f"\n{'='*50}")
+        print(f"Stage 2 | SNR = {snr_db} dB | Bayesian (Two-Stage)")
+        print('='*50)
+
+        if snr_db >= 30:
+            num_steps_s2 = 500
+        else:
+            num_steps_s2 = 250
+
+        squared_errors = {key: [] for key in selected_keys_s2}
+        snr_lin = 10.0 ** (snr_db / 10.0)
+
+        for m in range(M_s2):
+            print(f"  Run {m+1}/{M_s2}")
+
+            # Set fault params to this MC sample's true value
+            theta_true_this = theta_bayesian_fault[m]
+            for i, entry in enumerate(param_order_list_s2):
+                fault_name = entry[1]
+                network_params["fault_parameters"][fault_name]["value"] = theta_true_this[i].item()
+
+            # ===== Generate data using TRUE network params =====
+            # Temporarily restore TRUE network values for data generation
+            for entry in param_order_list_full:
+                ptype, name, subname = entry
+                if ptype == "cable":
+                    key = name
+                    network_params["cable_lengths"][name]["value"] = true_network_values[key]
+                elif ptype == "load":
+                    key = f"{name}.{subname}"
+                    network_params["loads"][name][subname]["value"] = true_network_values[key]
+
+            # Generate H_clean using TRUE network + TRUE fault
+            params_flat_s2 = get_true_param_flat()
+            cable_lengths, load_params, fault_params = build_params_from_flat(params_flat_s2, param_order_list_s2)
+            H_clean_s2 = forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)
+            sigpow_s2 = torch.mean(torch.abs(H_clean_s2)**2)
+            var_f_s2 = sigpow_s2 / snr_lin
+            std_f_s2 = torch.sqrt(var_f_s2 / 2)
+
+            H2_noisy_c = H_clean_s2 + std_f_s2 * torch.randn_like(H_clean_s2.real) + \
+                        1j * std_f_s2 * torch.randn_like(H_clean_s2.imag)
+            H2_noisy = torch.view_as_real(H2_noisy_c.unsqueeze(0))
+
+            # ===== Restore ESTIMATED network params for inference =====
+            for entry in param_order_list_full:
+                ptype, name, subname = entry
+                if ptype == "cable":
+                    key = name
+                    network_params["cable_lengths"][name]["value"] = estimated_network_values[key]
+                elif ptype == "load":
+                    key = f"{name}.{subname}"
+                    network_params["loads"][name][subname]["value"] = estimated_network_values[key]
+
+            # Run SVI inference with multi-start for high SNR
+            # (forward model now uses ESTIMATED network params)
+            if snr_db >= 10:
+                init_values = [0.0, -1.386, 1.386]  # sigmoid: 0.5, 0.2, 0.8
+                best_loss = float('inf')
+                best_params_s2 = None
+                for init_val in init_values:
+                    losses, params, _ = svi_engine.run_inference(
+                        H2_noisy, "with_fault", selected_keys_s2, std_f_s2, num_steps_s2,
+                        snr_db=snr_db, m=m, M=M_s2, p_val=p_fault,
+                        verbose=(init_val == 0.0),
+                        fault_position_init=init_val
+                    )
+                    final_loss = losses[-1] if losses else float('inf')
+                    if final_loss < best_loss:
+                        best_loss = final_loss
+                        best_params_s2 = params
             else:
-                num_steps = 500
-
-            snr_lin = 10.0 ** (snr_db / 10.0)
-            var_f = sigpow / snr_lin
-            wrapper_fn = H_nofault_wrapper #always no fault for stage 1
-
-            if mode == "frequentist":
-                # Frequentist: fixed θ_true, CRLB
-                crlb_dict = compute_real_CRLB(
-                    var_f, selected_keys, sensitivities_all[:p_val], scenario,
-                    wrapper_fn, get_true_param_flat, get_inferred_param_order
-                )
-                mse_dict, last_best_params = calculate_mse_monte_carlo(
-                    var_f, selected_keys, snr_db, num_steps, scenario, p_val
-                )
-                print(f"RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in mse_dict.items()})
-                print(f"sqrt(CRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in crlb_dict.items()})
-
-                # Store results
-                for key in selected_keys:
-                    if key in mse_dict and key in crlb_dict:
-                        rmse_results[key].append(math.sqrt(mse_dict[key]))
-                        crlb_results[key].append(math.sqrt(crlb_dict[key]))
-
-                # Store best_params for CI plotting (from last MC run)
-                best_params_per_snr[snr_db] = last_best_params
-
-            elif mode == "bayesian":
-                # Bayesian: θ ~ π(θ) each run, BCRLB
-
-                bcrlb_dict = compute_real_BCRLB(
-                    snr_db, selected_keys, theta_bayesian, scenario, ALPHA, forward_model,
-                    network_params, wrapper_fn, get_true_param_flat, get_inferred_param_order,
-                    set_network_params_from_normalized, build_params_from_flat
+                _, best_params_s2, _ = svi_engine.run_inference(
+                    H2_noisy, "with_fault", selected_keys_s2, std_f_s2, num_steps_s2,
+                    snr_db=snr_db, m=m, M=M_s2, p_val=p_fault
                 )
 
-                bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
-                    snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_val
-                )
-                print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
-                print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
+            # Extract posterior means and compute squared errors
+            posterior_means_s2 = svi_engine.extract_posterior_means(best_params_s2)
+            for key in selected_keys_s2:
+                true_val = theta_true_this[selected_keys_s2.index(key)].item()
+                posterior_key = key.replace(".", "_")
+                if posterior_key in posterior_means_s2:
+                    estimate = posterior_means_s2[posterior_key]
+                    squared_errors[key].append((estimate - true_val)**2)
 
-                # Store results (use same keys for plotting compatibility)
-                for key in selected_keys:
-                    if key in bayesian_mse_dict and key in bcrlb_dict:
-                        rmse_results[key].append(math.sqrt(bayesian_mse_dict[key]))
-                        crlb_results[key].append(math.sqrt(bcrlb_dict[key]))
+        # Compute BRMSE for this SNR
+        for key in selected_keys_s2:
+            brmse = math.sqrt(sum(squared_errors[key]) / len(squared_errors[key]))
+            rmse_results[key].append(brmse)
+            print(f"  {key}: Two-stage BRMSE = {brmse:.4f}")
 
-            else:
-                raise ValueError(f"Unknown mode: {mode}. Use 'frequentist' or 'bayesian'.")
-
-        # Store results for this p value
-        all_results[p_val] = {
-            'selected_keys': selected_keys,
-            'rmse_results': rmse_results,
-            'crlb_results': crlb_results,
-            'best_params_per_snr': best_params_per_snr,
-        }
-
-    # ---- Save results to .npz ----
+    # ==================== SAVE RESULTS ====================
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Convert results to numpy-compatible format
-    results_to_save = {}
-    for p_val in p_values:
-        prefix = f"p{p_val}"
-        results_to_save[f"{prefix}_selected_keys"] = np.array(all_results[p_val]['selected_keys'], dtype=object)
-        for key in all_results[p_val]['selected_keys']:
-            safe_key = key.replace(".", "_")
-            results_to_save[f"{prefix}_{safe_key}_rmse"] = np.array(all_results[p_val]['rmse_results'][key])
-            results_to_save[f"{prefix}_{safe_key}_crlb"] = np.array(all_results[p_val]['crlb_results'][key])
-
-        # Save best_params for each SNR (for CI plotting)
-        for snr_db, best_params in all_results[p_val]['best_params_per_snr'].items():
-            snr_prefix = f"{prefix}_snr{snr_db}"
-            # Convert Pyro params to numpy
-            for param_name, param_val in best_params.items():
-                if hasattr(param_val, 'detach'):
-                    results_to_save[f"{snr_prefix}_{param_name}"] = param_val.detach().cpu().numpy()
-                else:
-                    results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
-
-    # Create theta_true_dict for proper reconstruction in plotting
-    # Maps parameter key strings to their true values
-    theta_true_dict = {}
-    for i, entry in enumerate(param_order_list_full):
-        param_type, name1, name2 = entry
-        if param_type == "cable":
-            key = name1  # e.g., 'l_w_0'
-        elif param_type == "load":
-            key = f"{name1}.{name2}"  # e.g., 'load_0.C_m'
-        elif param_type == "fault_param":
-            key = name1  # e.g., 'fault_position'
-        theta_true_dict[key] = theta_true[i].item()
-    #  Extract fault_position range for filename
+    # Prepare save data
     fp_range = network_params["fault_parameters"]["fault_position"]["range"]
-    fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
+    save_data = {
+        'snr_dbs': np.array(snr_dbs_s2),
+        'selected_keys': np.array(selected_keys_s2, dtype=object),
+        'selected_keys_s1': np.array(selected_keys_s1, dtype=object),
+        'M': M_s2,
+        'ALPHA': ALPHA,
+        'SEED': SEED,
+        'snr_db_s1': snr_db_s1,
+        'freq_range_str': freq_range_str,
+        'fp_range': fp_range,
+        'mode': 'bayesian',
+        'frequencies': frequencies.numpy(),
+        'network_params': network_params,
+        'true_network_values': true_network_values,
+        'estimated_network_values': estimated_network_values,
+        'theta_true_network': theta_true_network.numpy(),
+    }
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage1_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
-    np.savez(
-        save_path,
-        snr_dbs=np.array(snr_dbs),
-        p_values=np.array(p_values),
-        sorted_keys_all=np.array(sorted_keys_all, dtype=object),
-        sensitivities_all=np.array(sensitivities_all),
-        theta_true=theta_true.numpy(),
-        theta_true_dict=theta_true_dict,  # Dict for correct key->value mapping
-        frequencies=frequencies.numpy(),
-        network_params=network_params,  # Save for forward model reconstruction
-        M=M,
-        ALPHA=ALPHA,
-        SEED=SEED,
-        scenario=scenario,
-        freq_range_str=freq_range_str,
-        mode=mode,  # Save mode for plotting
-        **results_to_save
-    )
+    # Add Stage 1 variational params (for CI plots)
+    for param_name, param_val in best_params_s1.items():
+        if hasattr(param_val, 'detach'):
+            save_data[f"s1_{param_name}"] = param_val.detach().cpu().numpy()
+        else:
+            save_data[f"s1_{param_name}"] = np.array(param_val)
+
+    # Add RMSE results (BCRLB comes from ideal run_stage2_mtl.py)
+    for key in selected_keys_s2:
+        safe_key = key.replace(".", "_")
+        save_data[f"{safe_key}_rmse"] = np.array(rmse_results[key])
+
+    save_path = os.path.join(OUTPUT_DIR, f"bothstages_results_{freq_range_str}_M{M_s2}_S1snr{snr_db_s1}.npz")
+    np.savez(save_path, **save_data)
     print(f"\nResults saved to: {save_path}")
 
     elapsed = time.perf_counter() - start_time

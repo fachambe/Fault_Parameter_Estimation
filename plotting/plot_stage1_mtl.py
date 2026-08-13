@@ -122,7 +122,7 @@ def plot_stage1_p_comparison(
 
         ax.set_xlabel("SNR (dB)", fontsize=15)
         ax.set_ylabel("Normalized Error", fontsize=15)
-
+        ax.set_yscale('log')
         ax.tick_params(axis="both",which="major",labelsize=12,direction="in"
         )
 
@@ -149,7 +149,6 @@ def plot_stage1_p_comparison(
             [0], [0],
             color="black",
             linestyle="-",
-            marker="o",
             markersize=4.5,
             linewidth=1.8,
             label=rmse_label
