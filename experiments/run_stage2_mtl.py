@@ -671,8 +671,8 @@ def main():
     #snr_dbs = [35, 40]
     #snr_dbs = [0]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
-    #mode = "frequentist"
-    mode = "bayesian"
+    mode = "frequentist"
+    #mode = "bayesian"
     num_steps = 250
 
 
