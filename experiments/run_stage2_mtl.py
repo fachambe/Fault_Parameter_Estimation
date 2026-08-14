@@ -27,7 +27,7 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
@@ -542,7 +542,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_st
         # )
         
         # 2. Run SVI inference (multi-start for high SNR to escape local minima)
-        if snr_db >= 10:
+        if snr_db >= 0:
             # Multi-start: run from 3 different fault_position inits
             # sigmoid(0.0)=0.5, sigmoid(-1.386)≈0.2, sigmoid(1.386)≈0.8
             init_values = [0.0, -1.386, 1.386]
@@ -667,8 +667,8 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-    snr_dbs = [35, 40]
+    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    #snr_dbs = [35, 40]
     #snr_dbs = [0]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
@@ -725,10 +725,10 @@ def main():
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
         # At high SNR, loss landscape is sharper and needs more steps to converge
-        if snr_db <= 30:
-            num_steps = 250
-        else:
-            num_steps = 500
+        # if snr_db <= 30:
+        #     num_steps = 250
+        # else:
+        #     num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
@@ -812,7 +812,7 @@ def main():
     fp_range = network_params["fault_parameters"]["fault_position"]["range"]
     fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}_35-40dBonly.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
