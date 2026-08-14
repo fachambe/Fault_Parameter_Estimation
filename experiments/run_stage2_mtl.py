@@ -667,8 +667,8 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-    #snr_dbs = [30, 35]
+    #snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs = [35, 40]
     #snr_dbs = [0]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
@@ -812,7 +812,7 @@ def main():
     fp_range = network_params["fault_parameters"]["fault_position"]["range"]
     fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}_35-40dBonly.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),

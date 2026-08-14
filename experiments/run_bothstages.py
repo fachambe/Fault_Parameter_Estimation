@@ -552,13 +552,10 @@ def main():
     # Get param order for all network parameters (Stage 1)
     param_order_list_full, p_tot = get_inferred_param_order()
 
-    # Sample TRUE theta from prior for network params
-    torch.manual_seed(SEED + 1)
-    beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
-    theta_true_network = beta_dist.sample((p_tot,))
-    set_network_params_from_normalized(theta_true_network, param_order_list_full)
+    # TRUE network params stay at default (0.25) to match run_stage2_mtl.py
+    # This allows fair comparison: Stage 2 standalone uses 0.25, two-stage estimates it
 
-    # Store true network param values (for later comparison)
+    # Store true network param values (for later comparison) - all should be 0.25
     true_network_values = {key: svi_engine.get_true_param_value(key)
                           for key in [entry[1] if entry[0] == "cable" else f"{entry[1]}.{entry[2]}"
                                      for entry in param_order_list_full]}
@@ -640,6 +637,7 @@ def main():
 
     # Sample fault parameter values from prior for Bayesian
     torch.manual_seed(SEED)
+    beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
     theta_bayesian_fault = beta_dist.sample((M_s2, p_fault))
 
     # Initialize results storage (only BRMSE, BCRLB comes from ideal run_stage2_mtl.py)
@@ -768,7 +766,8 @@ def main():
         'network_params': network_params,
         'true_network_values': true_network_values,
         'estimated_network_values': estimated_network_values,
-        'theta_true_network': theta_true_network.numpy(),
+        # True network params are all 0.25 (default) - store as tensor for consistency
+        'theta_true_network': np.full(p_tot, 0.25),
     }
 
     # Add Stage 1 variational params (for CI plots)
