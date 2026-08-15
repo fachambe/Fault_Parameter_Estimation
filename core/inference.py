@@ -471,7 +471,7 @@ class SVIEngine:
         then computes the MC mean of the sigmoid-transformed Normal.
 
         Args:
-            best_params: Dict of parameter values from run_inference
+            best_params: Dict of raw Pyro param store values (_loc and _scale) from run_inference
             num_samples: Number of MC samples for computing the mean
 
         Returns:

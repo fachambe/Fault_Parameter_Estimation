@@ -123,7 +123,7 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
 
     plt.tight_layout()
 
-    filename = f"stage2_fault_rmse_crlb_{freq_range_str}_{mode}_{alpha}_{fp_range}.pdf"
+    filename = f"stage2_fault_rmse_crlb_M{M}_{freq_range_str}_{mode}_{alpha}_{fp_range}_025all.pdf"
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
