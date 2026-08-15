@@ -741,8 +741,8 @@ def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
-    mode = "frequentist"
-    #mode = "bayesian"
+    #mode = "frequentist"
+    mode = "bayesian"
     num_steps = 250
 
 
