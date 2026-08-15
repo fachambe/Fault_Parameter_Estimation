@@ -676,7 +676,7 @@ def main(cfg_path="config/simple_network_config.yaml", snr_db=40,
          save_dir="figures/plot_loss_landscapes"):
     """Main function to plot all loss landscape analyses."""
     cfg = yaml.safe_load(open(cfg_path))
-    device = torch.device(cfg.get("device", "cpu"))
+    device = torch.device(cfg.get("general", {}).get("device", "cpu"))
 
     # Find and load forward model
     fm_path = find_forward_model()
@@ -685,6 +685,10 @@ def main(cfg_path="config/simple_network_config.yaml", snr_db=40,
         return
     print(f"Loading forward model from {fm_path}")
     fm = torch.load(fm_path, weights_only=False)
+    # Move forward model tensors to correct device
+    fm.gamma = fm.gamma.to(device)
+    fm.Zc = fm.Zc.to(device)
+    fm.device = device
 
     # Find and load observation file
     obs_path = find_observation_file(snr_db=snr_db)
@@ -702,7 +706,7 @@ def main(cfg_path="config/simple_network_config.yaml", snr_db=40,
     noise_var = torch.tensor(obs_data["noise_var"][0:1], device=device, dtype=torch.float32)
 
     fixed = cfg["fixed"]
-    true_range = cfg["true_range"]
+    true_range = cfg["parameter_ranges"]
 
     # Create save directory
     save_path = pathlib.Path(save_dir)
@@ -741,7 +745,7 @@ def main(cfg_path="config/simple_network_config.yaml", snr_db=40,
             fm, fixed, pul_freq_full, gamma_full, Zc_full,
             snr_db=snr_db, device=device,
             save_path=str(save_path / "freq_impact_loss_landscape.pdf"),
-            num_points=cfg["freq"]["num_points"]
+            num_points=cfg["frequencies"]["num_points"]
         )
     else:
         print("Warning: Frequency data not in observation file, skipping freq impact plot.")

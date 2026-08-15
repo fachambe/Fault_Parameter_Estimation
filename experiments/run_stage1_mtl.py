@@ -24,7 +24,7 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 OUTPUT_DIR = "stage_1_results"
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
-NUM_PARTICLES = 10  # Number of particles for SVI
+NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
 M = 200 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
@@ -709,7 +709,6 @@ def main():
     import multiprocessing
     start_time = time.perf_counter()
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
-    #snr_dbs = [0, 20, 40]
     p_values = [10, 30, 50]
     #p_values = [50]
     scenario = "no_fault"
@@ -818,10 +817,10 @@ def main():
             print(f"\n{'='*50}")
             print(f"p = {p_val} | SNR = {snr_db} dB | Mode = {mode}")
             print('='*50)
-            if snr_db <= 20:
-                num_steps = 250
-            else:
-                num_steps = 500
+            # if snr_db <= 20:
+            #     num_steps = 250
+            # else:
+            #     num_steps = 500
 
             snr_lin = 10.0 ** (snr_db / 10.0)
             var_f = sigpow / snr_lin

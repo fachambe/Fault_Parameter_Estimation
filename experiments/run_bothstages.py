@@ -636,7 +636,7 @@ def main():
     print(f"\nSTAGE 2: Inferring {p_fault} fault parameters: {selected_keys_s2}")
 
     # Sample fault parameter values from prior for Bayesian
-    torch.manual_seed(SEED)
+    torch.manual_seed(SEED-1)
     beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
     theta_bayesian_fault = beta_dist.sample((M_s2, p_fault))
 

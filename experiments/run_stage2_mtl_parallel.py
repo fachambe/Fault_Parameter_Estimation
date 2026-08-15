@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import torch
 from torch.func import jacfwd
+from joblib import Parallel, delayed
 from core.mtl_utils import *
 from core.loads import *
 from core.forward_mtl import MTLForwardModel
@@ -27,9 +28,10 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
+N_JOBS = -1  # Number of parallel jobs (-1 = use all cores)
 # 1 = Constant, 2 = Double RLC, 3 = Motor
 FIXED_LOAD_TYPES = [
     3,  # load_0 R6-O3  Motor
@@ -179,13 +181,13 @@ def get_true_param_flat():
 
 def get_inferred_param_order():
     """
-    Get ordered list of inferred parameters for consistent flat tensor indexing from network_params dict. 
+    Get ordered list of inferred parameters for consistent flat tensor indexing from network_params dict.
 
     Returns:
         param_order: List of tuples describing each parameter:
             - ("cable", cable_name, None) for cable lengths
             - ("load", load_name, param_name) for load parameters
-        
+
         num_params: Total number of inferred parameters (p)
     """
     param_order = []
@@ -366,7 +368,7 @@ def perform_local_sensitivity_analysis(scenario):
     n_freq = J.shape[0]
     n_params = J.shape[2]
     J_flat = J.reshape(n_freq * 2, n_params)  # [F*2, P]
-    
+
     # Sensitivity = norm of each column (each parameter's Jacobian)
     sensitivities_raw = torch.norm(J_flat, dim=0)  # [P]
     # Normalize to percentages
@@ -384,115 +386,260 @@ def perform_local_sensitivity_analysis(scenario):
         elif item[0] == 'fault_param':
             # ('fault_param', 'Z_fault_real', None)
             param_keys.append(item[1])
-    
+
     # Create dict mapping param_key -> sensitivity
-    sensitivity_dict = {param_keys[i]: sensitivities_normalized[i].item() 
+    sensitivity_dict = {param_keys[i]: sensitivities_normalized[i].item()
                         for i in range(n_params)}
-    
+
     # Sort by sensitivity (descending)
-    sorted_params = sorted(sensitivity_dict.keys(), 
-                          key=lambda k: sensitivity_dict[k], 
+    sorted_params = sorted(sensitivity_dict.keys(),
+                          key=lambda k: sensitivity_dict[k],
                           reverse=True)
-    
+
     # Select top p
     selected = sorted_params[:p]
 
     # Build sensitivities list in sorted order (as percentages)
     sensitivities = [sensitivity_dict[k] * 100 for k in sorted_params]
-    
+
     # Print results
     print("\n--- LOCAL Sensitivity Analysis (at theta_true) ---")
     for idx, k in enumerate(sorted_params):
         if idx == p:
             print(f"--- Top {p} selected above this line ---")
         print(f"{k}: {sensitivity_dict[k]*100:.5f}%")
-    
+
     print(f"\nSelected top {p} most sensitive parameters: {selected}")
     print(f"Number of selected parameters: {len(selected)}")
 
     return selected, sorted_params, sensitivities
 
 
-def plot_loss_landscape_fault_position(H_noisy, std_f, theta_true_normalized, param_order_list,
-                                        snr_db, m, num_points=200):
+
+def run_single_bayesian_trial_stage2(m, theta_true_normalized, snr_db, selected_keys, num_steps, scenario, p_val):
     """
-    Plot the negative log-likelihood landscape w.r.t. fault_position,
-    with Z_fault_real and Z_fault_imag fixed at their true values.
+    Run a single Bayesian MC trial for Stage 2. This function is designed to be called in parallel.
+
+    Each worker initializes its own forward_model and svi_engine to avoid sharing issues.
 
     Args:
-        H_noisy: Noisy observation [1, F, 2] (real view)
-        std_f: Noise standard deviation
-        theta_true_normalized: True normalized parameters [p]
-        param_order_list: Parameter order list
-        snr_db: SNR in dB (for filename)
-        m: Monte Carlo run index (for filename)
-        num_points: Number of points to sweep
+        m: Trial index
+        theta_true_normalized: True theta for this trial [p]
+        snr_db: SNR in dB
+        selected_keys: List of parameter keys to infer
+        num_steps: Number of SVI steps
+        scenario: "with_fault" for Stage 2
+        p_val: Number of inferred parameters
+
+    Returns:
+        trial_errors: Dict {key: squared_error} for this trial
     """
-    # Get true values for Z_fault_real and Z_fault_imag
-    # param_order_list for Stage 2: [('fault_param', 'fault_position', None),
-    #                                 ('fault_param', 'Z_fault_real', None),
-    #                                 ('fault_param', 'Z_fault_imag', None)]
-    true_fp = theta_true_normalized[0].item()
-    true_zfr = theta_true_normalized[1].item()
-    true_zfi = theta_true_normalized[2].item()
+    # Each worker needs its own copy of network_params to avoid race conditions
+    import copy
+    local_network_params = copy.deepcopy(network_params)
 
-    # Convert H_noisy back to complex
-    H_noisy_complex = H_noisy[0, :, 0] + 1j * H_noisy[0, :, 1]  # [F]
+    # Initialize local forward model and SVI engine
+    local_forward_model = MTLForwardModel(frequencies, local_network_params, device=device)
+    local_inference_config = InferenceConfig(
+        alpha=ALPHA,
+        num_particles=NUM_PARTICLES,
+        vectorize_particles=VECTORIZE_PARTICLES,
+        optimizer=OPTIMIZER,
+        learning_rate=LR,
+        device=device,
+    )
+    local_svi_engine = SVIEngine(local_forward_model, local_network_params, local_inference_config)
 
-    # Sweep fault_position
-    fp_values = torch.linspace(0.01, 0.99, num_points, device=device)
-    neg_log_likelihoods = []
+    # Helper to set network params from normalized theta
+    def local_set_network_params(sampled_theta, param_order_list):
+        counter = 0
+        for params in param_order_list:
+            if params[0] == "load":
+                entity_name = params[1]
+                param_name = params[2]
+                local_network_params["loads"][entity_name][param_name]["value"] = sampled_theta[counter].item()
+                counter += 1
+            elif params[0] == "cable":
+                cable_name = params[1]
+                local_network_params["cable_lengths"][cable_name]["value"] = sampled_theta[counter].item()
+                counter += 1
+            elif params[0] == "fault_param":
+                fault_name = params[1]
+                local_network_params["fault_parameters"][fault_name]["value"] = sampled_theta[counter].item()
+                counter += 1
 
-    # Get current cable_lengths and load_params (these are fixed)
-    cable_lengths, load_params, _ = build_params_from_flat(get_true_param_flat(), param_order_list)
+    def local_get_true_param_flat():
+        param_order = []
+        for cable_name in sorted(local_network_params["cable_lengths"].keys(), key=lambda x: int(x.split("_")[-1])):
+            if local_network_params["cable_lengths"][cable_name]["inferred"]:
+                param_order.append(("cable", cable_name, None))
+        for load_name in sorted(local_network_params["loads"].keys(), key=lambda x: int(x.split("_")[-1])):
+            for param_name in sorted(local_network_params["loads"][load_name].keys()):
+                if local_network_params["loads"][load_name][param_name]["inferred"]:
+                    param_order.append(("load", load_name, param_name))
+        for fault_name in local_network_params["fault_parameters"]:
+            if local_network_params["fault_parameters"][fault_name]["inferred"]:
+                param_order.append(("fault_param", fault_name, None))
 
-    var_f = 2 * std_f**2  # Noise variance
+        params_flat = torch.zeros(len(param_order), dtype=torch.float32, device=device)
+        for i, (ptype, name, subname) in enumerate(param_order):
+            if ptype == "cable":
+                params_flat[i] = local_network_params["cable_lengths"][name]["value"]
+            elif ptype == "load":
+                params_flat[i] = local_network_params["loads"][name][subname]["value"]
+            elif ptype == "fault_param":
+                params_flat[i] = local_network_params["fault_parameters"][name]["value"]
+        return params_flat, param_order
 
-    for fp in fp_values:
-        # Create fault_params with swept fault_position but true Z_fault values
-        fault_params = {
-            'fault_position': fp,
-            'Z_fault_real': torch.tensor(true_zfr, device=device),
-            'Z_fault_imag': torch.tensor(true_zfi, device=device)
-        }
+    def local_build_params_from_flat(params_flat, param_order):
+        cable_lengths = {}
+        for cable_name, cable_info in local_network_params["cable_lengths"].items():
+            cable_lengths[cable_name] = torch.tensor(cable_info["value"], dtype=torch.float32, device=device)
+        load_params = {}
+        for load_name, params in local_network_params["loads"].items():
+            load_params[load_name] = {}
+            for param_name, param_info in params.items():
+                load_params[load_name][param_name] = torch.tensor(param_info["value"], dtype=torch.float32, device=device)
+        fault_params = {}
+        for fault_name, fault_info in local_network_params["fault_parameters"].items():
+            fault_params[fault_name] = torch.tensor(fault_info["value"], dtype=torch.float32, device=device)
+        for i, (ptype, name, subname) in enumerate(param_order):
+            if ptype == "cable":
+                cable_lengths[name] = params_flat[i]
+            elif ptype == "load":
+                load_params[name][subname] = params_flat[i]
+            elif ptype == "fault_param":
+                fault_params[name] = params_flat[i]
+        return cable_lengths, load_params, fault_params
 
-        # Compute predicted H
-        H_pred = forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)  # [F] complex
+    # Get param order
+    param_order_list = []
+    for fault_name in local_network_params["fault_parameters"]:
+        if local_network_params["fault_parameters"][fault_name]["inferred"]:
+            param_order_list.append(("fault_param", fault_name, None))
 
-        # Compute negative log-likelihood: (1/2σ²) * ||H_noisy - H_pred||²
-        residual = H_noisy_complex - H_pred
-        nll = (1 / var_f) * torch.sum(torch.abs(residual)**2).item()
-        neg_log_likelihoods.append(nll)
+    # Set theta for this trial
+    local_set_network_params(theta_true_normalized, param_order_list)
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(fp_values.numpy(), neg_log_likelihoods, 'b-', linewidth=1.5)
-    ax.axvline(x=true_fp, color='r', linestyle='--', linewidth=2, label=f'True position = {true_fp:.4f}')
-    ax.axvline(x=0.5, color='g', linestyle=':', linewidth=2, label='SVI init = 0.5')
+    # Generate clean signal
+    params_flat, param_order = local_get_true_param_flat()
+    cable_lengths, load_params, fault_params = local_build_params_from_flat(params_flat, param_order)
+    H_clean = local_forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)
 
-    # Mark the minimum
-    min_idx = np.argmin(neg_log_likelihoods)
-    min_fp = fp_values[min_idx].item()
-    ax.axvline(x=min_fp, color='orange', linestyle='-', linewidth=2, label=f'Min at = {min_fp:.4f}')
+    sigpow = torch.mean(torch.abs(H_clean)**2)
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    var_f = sigpow / snr_lin
+    std_f = torch.sqrt(var_f / 2)
 
-    ax.set_xlabel('Fault Position (normalized)', fontsize=12)
-    ax.set_ylabel('Negative Log-Likelihood', fontsize=12)
-    ax.set_title(f'Loss Landscape: SNR={snr_db}dB, m={m+1}\n'
-                 f'Z_fault_real={true_zfr:.4f}, Z_fault_imag={true_zfi:.4f} (fixed at true)', fontsize=11)
-    ax.legend(fontsize=10)
-    ax.grid(True, alpha=0.3)
+    # Add noise
+    H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
+                1j * std_f * torch.randn_like(H_clean.imag)
+    H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
 
-    # Save figure
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    save_path = os.path.join(OUTPUT_DIR, f'loss_landscape_snr{snr_db}_m{m+1}.png')
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"Loss landscape saved to: {save_path}")
+    # Run SVI (multi-start for high SNR)
+    if snr_db >= 0:
+        init_values = [0.0, -1.386, 1.386]
+        best_loss = float('inf')
+        best_params = None
+        for init_val in init_values:
+            losses, params, _ = local_svi_engine.run_inference(
+                H1_noisy, scenario, selected_keys, std_f, num_steps,
+                snr_db=snr_db, m=m, M=M, p_val=p_val,
+                verbose=False,
+                fault_position_init=init_val
+            )
+            final_loss = losses[-1] if losses else float('inf')
+            if final_loss < best_loss:
+                best_loss = final_loss
+                best_params = params
+    else:
+        _, best_params, _ = local_svi_engine.run_inference(
+            H1_noisy, scenario, selected_keys, std_f, num_steps,
+            snr_db=snr_db, m=m, M=M, p_val=p_val,
+            verbose=False
+        )
+
+    # Extract posterior means
+    posterior_means = local_svi_engine.extract_posterior_means(best_params)
+
+    # Compute squared errors
+    trial_errors = {}
+    for key in selected_keys:
+        true_val = local_svi_engine.get_true_param_value(key)
+        posterior_key = key.replace(".", "_")
+        if posterior_key in posterior_means:
+            estimate = posterior_means[posterior_key]
+            trial_errors[key] = (estimate - true_val)**2
+
+    return trial_errors
+
+
+def run_single_frequentist_trial_stage2(m, H_clean, std_f, snr_db, selected_keys, num_steps, scenario, p_val):
+    """
+    Run a single Frequentist MC trial for Stage 2. This function is designed to be called in parallel.
+
+    Each worker initializes its own forward_model and svi_engine to avoid sharing issues.
+
+    Args:
+        m: Trial index
+        H_clean: Clean transfer function (shared across trials)
+        std_f: Noise standard deviation
+        snr_db: SNR in dB
+        selected_keys: List of parameter keys to infer
+        num_steps: Number of SVI steps
+        scenario: "with_fault" for Stage 2
+        p_val: Number of inferred parameters
+
+    Returns:
+        trial_errors: Dict {key: squared_error} for this trial
+        best_params: Best params from SVI for CI plotting
+    """
+    # Each worker needs its own copy of network_params to avoid race conditions
+    import copy
+    local_network_params = copy.deepcopy(network_params)
+
+    # Initialize local forward model and SVI engine
+    local_forward_model = MTLForwardModel(frequencies, local_network_params, device=device)
+    local_inference_config = InferenceConfig(
+        alpha=ALPHA,
+        num_particles=NUM_PARTICLES,
+        vectorize_particles=VECTORIZE_PARTICLES,
+        optimizer=OPTIMIZER,
+        learning_rate=LR,
+        device=device,
+    )
+    local_svi_engine = SVIEngine(local_forward_model, local_network_params, local_inference_config)
+
+    # Generate noisy observation
+    H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
+                 1j * std_f * torch.randn_like(H_clean.imag)
+    H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
+
+    # Run SVI inference
+    _, best_params, _ = local_svi_engine.run_inference(
+        H1_noisy, scenario, selected_keys, std_f, num_steps,
+        snr_db=snr_db, m=m, M=M, p_val=p_val,
+        verbose=False
+    )
+
+    # Extract posterior means
+    posterior_means = local_svi_engine.extract_posterior_means(best_params)
+
+    # Compute squared errors
+    trial_errors = {}
+    for key in selected_keys:
+        true_val = local_svi_engine.get_true_param_value(key)
+        posterior_key = key.replace(".", "_")
+        if posterior_key in posterior_means:
+            estimate = posterior_means[posterior_key]
+            trial_errors[key] = (estimate - true_val)**2
+
+    return trial_errors, best_params
 
 
 def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_steps, scenario, p_val=None):
     """
-    Compute Bayesian MSE via Monte Carlo at specific SNR.
+    Compute Bayesian MSE via Monte Carlo at specific SNR using parallel execution.
 
     For each trial:
       1. Use pre-generated θ_true
@@ -512,92 +659,31 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_st
     Returns:
         bayesian_mse_dict: {param_name: Bayesian MSE} in selected keys order
     """
-    param_order_list, _ = get_inferred_param_order()
+    print(f"Running {M} Bayesian MC trials in parallel...")
+
+    # Run trials in parallel
+    results = Parallel(n_jobs=N_JOBS, backend='loky', verbose=10)(
+        delayed(run_single_bayesian_trial_stage2)(
+            m, all_thetas[m], snr_db, selected_keys, num_steps, scenario, p_val
+        )
+        for m in range(M)
+    )
+
+    # Aggregate results
     squared_errors = {key: [] for key in selected_keys}
-    snr_lin = 10.0 ** (snr_db / 10.0)
-
-    for m in range(M):
-        print(f"Run {m+1}/{M}")
-        theta_true_normalized = all_thetas[m]
-        set_network_params_from_normalized(theta_true_normalized, param_order_list)
-
-        # 1. Generate clean signal from this theta
-        cable_lengths, load_params, fault_params = build_params_from_flat(get_true_param_flat(), param_order_list)
-        if scenario == "with_fault":
-            H_clean = forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)
-        else:
-            H_clean = forward_model.calculate_Hnw_nofault(cable_lengths, load_params)
-        sigpow = torch.mean(torch.abs(H_clean)**2)
-        var_f = sigpow / snr_lin
-        std_f = torch.sqrt(var_f / 2)
-        H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
-                    1j * std_f * torch.randn_like(H_clean.imag)
-        H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))
-
-        # Plot loss landscape
-        # plot_loss_landscape_fault_position(
-        #         H1_noisy, std_f, theta_true_normalized, param_order_list,
-        #         snr_db, m
-        # )
-
-        # 2. Run SVI inference (multi-start for high SNR to escape local minima)
-        if snr_db >= 20:
-            # Multi-start: run from 3 different fault_position inits
-            # sigmoid(0.0)=0.5, sigmoid(-1.386)≈0.2, sigmoid(1.386)≈0.8
-            init_values = [0.0, -1.386, 1.386]
-            best_loss = float('inf')
-            best_params = None
-            for init_val in init_values:
-                losses, params, _ = svi_engine.run_inference(
-                    H1_noisy, scenario, selected_keys, std_f, num_steps,
-                    snr_db=snr_db, m=m, M=M, p_val=p_val,
-                    #verbose=True,
-                    verbose=(init_val == 0.0),  # Only print for first init
-                    fault_position_init=init_val
-                )
-                final_loss = losses[-1] if losses else float('inf')
-                if final_loss < best_loss:
-                    best_loss = final_loss
-                    best_params = params
-            print(f"  Multi-start: best loss = {best_loss:.2f}")
-            # Print best params vs true values
-            for key in selected_keys:
-                store_key = key.replace(".", "_") + "_loc"
-                if store_key in best_params:
-                    loc = best_params[store_key]
-                    if hasattr(loc, 'detach'):
-                        loc = loc.detach().item()
-                    estimate = 1 / (1 + math.exp(-loc))  # sigmoid
-                    true_val = svi_engine.get_true_param_value(key)
-                    print(f"    {key:20s}: estimate = {estimate:.4f} | true = {true_val:.4f}")
-        else:
-            # Single run for low SNR
-            _, best_params, _ = svi_engine.run_inference(
-                H1_noisy, scenario, selected_keys, std_f, num_steps,
-                snr_db=snr_db, m=m, M=M, p_val=p_val
-            )
-
-        # 3. Extract posterior means for this run
-        posterior_means = svi_engine.extract_posterior_means(best_params)
-
-        # 4. Compute squared errors vs true theta
-        for key in selected_keys:
-            # Get true value directly from network_params
-            true_val = svi_engine.get_true_param_value(key)
-
-            posterior_key = key.replace(".", "_")
-            if posterior_key in posterior_means:
-                estimate = posterior_means[posterior_key]
-                squared_errors[key].append((estimate - true_val)**2)
+    for trial_errors in results:
+        for key, err in trial_errors.items():
+            squared_errors[key].append(err)
 
     # Average squared errors
     bayesian_mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
 
     return bayesian_mse_dict
 
+
 def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario, p_val=None):
     """
-    Compute Frequentist MSE via Monte Carlo at specific SNR.
+    Compute Frequentist MSE via Monte Carlo at specific SNR using parallel execution.
     For each trial:
       1. Generate data y ~ p(y|θ_true) at theta_true
       2. Run SVI to get estimate θ̂
@@ -618,51 +704,38 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
     """
     param_order_list, _ = get_inferred_param_order()
     params_flat = get_true_param_flat()
-
-    squared_errors = {key: [] for key in selected_keys}
     std_f = torch.sqrt(var_f / 2)
-    last_best_params = None
 
-    # Compute H_clean and then H_noisy for SVI from true network parameters not inferred
+    # Compute H_clean (shared across all trials)
     cable_lengths, load_params, fault_params = build_params_from_flat(params_flat, param_order_list)
     if scenario == 'with_fault':
         H_clean = forward_model.calculate_Hnw(cable_lengths, load_params, fault_params)
     else:
         H_clean = forward_model.calculate_Hnw_nofault(cable_lengths, load_params)
 
-    for m in range(M):
-        print(f"Run {m+1}/{M}")
+    print(f"Running {M} Frequentist MC trials in parallel...")
 
-        # 1. Generate noisy observation (different observation each run because of noise)
-        H1_noisy_c = H_clean + std_f * torch.randn_like(H_clean.real) + \
-                     1j * std_f * torch.randn_like(H_clean.imag)
-        H1_noisy = torch.view_as_real(H1_noisy_c.unsqueeze(0))  # [1, F, 2]
-
-        # 2. Run SVI inference
-        _, best_params, _ = svi_engine.run_inference(
-            H1_noisy, scenario, selected_keys, std_f, num_steps,
-            snr_db=snr_db, m=m, M=M, p_val=p_val
+    # Run trials in parallel
+    results = Parallel(n_jobs=N_JOBS, backend='loky', verbose=10)(
+        delayed(run_single_frequentist_trial_stage2)(
+            m, H_clean, std_f, snr_db, selected_keys, num_steps, scenario, p_val
         )
+        for m in range(M)
+    )
 
-        # 3. Extract posterior means for this run
-        posterior_means = svi_engine.extract_posterior_means(best_params)
-
-        # 4. Compute squared errors vs true theta
-        for key in selected_keys:
-            # Get true value directly from network_params
-            true_val = svi_engine.get_true_param_value(key)
-
-            posterior_key = key.replace(".", "_")
-            if posterior_key in posterior_means:
-                estimate = posterior_means[posterior_key]
-                squared_errors[key].append((estimate - true_val)**2)
-
-        # Keep last run's best_params for CI plotting
-        last_best_params = best_params
+    # Aggregate results
+    squared_errors = {key: [] for key in selected_keys}
+    last_best_params = None
+    for i, (trial_errors, best_params) in enumerate(results):
+        for key, err in trial_errors.items():
+            squared_errors[key].append(err)
+        if i == len(results) - 1:
+            last_best_params = best_params
 
     # Average squared errors
     mse_dict = {key: sum(errs)/len(errs) for key, errs in squared_errors.items() if errs}
     return mse_dict, last_best_params
+
 
 def main():
     start_time = time.perf_counter()
@@ -803,7 +876,7 @@ def main():
     fp_range = network_params["fault_parameters"]["fault_position"]["range"]
     fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}_025parallel.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),

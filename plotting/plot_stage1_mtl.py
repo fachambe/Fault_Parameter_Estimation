@@ -122,7 +122,7 @@ def plot_stage1_p_comparison(
 
         ax.set_xlabel("SNR (dB)", fontsize=15)
         ax.set_ylabel("Normalized Error", fontsize=15)
-        ax.set_yscale('log')
+        #ax.set_yscale('log')
         ax.tick_params(axis="both",which="major",labelsize=12,direction="in"
         )
 
@@ -184,7 +184,7 @@ def plot_stage1_p_comparison(
 
     filename = (
         f"stage1_p_comparison_M{M}_"
-        f"{freq_range_str}_{mode}.pdf"
+        f"{freq_range_str}_{mode}_NEW.pdf"
     )
 
     if output_dir:
@@ -254,10 +254,9 @@ def plot_rmse_vs_crlb_all_params(snr_dbs, all_results, p_val, M, freq_range_str,
     for idx in range(n_params, len(axes)):
         axes[idx].set_visible(False)
 
-    #fig.suptitle(f'Stage 1 ({title_suffix}): {rmse_label} vs {crlb_label} (p={p_val}, M={M})', fontsize=12)
     plt.tight_layout()
 
-    filename = f"stage1_rmse_crlb_p{p_val}_M{M}_{freq_range_str}_{mode}.pdf"
+    filename = f"stage1_rmse_crlb_p{p_val}_M{M}_{freq_range_str}_{mode}_NEW.pdf"
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
@@ -425,19 +424,20 @@ def plot_CI_grid(data, p_val, M, snr_dbs_to_plot, freq_range_str, output_dir=Non
                        alpha=0.3, color='steelblue', label='95% CI')
 
         ax.set_xscale('log')
-        ax.set_xlabel('Frequency (MHz)', fontsize=10)
-        ax.set_ylabel(r'$H_{1,1}$ (dB)', fontsize=10)
+        ax.set_xlabel('Frequency (MHz)', fontsize=12)
+        ax.set_ylabel(r'$H_{1,1}$ (dB)', fontsize=12)
         ax.grid(True, which='both', linestyle='--', alpha=0.5)
+        ax.tick_params(axis="both", which="major", labelsize=12, direction="in")
 
     # Single figure-level legend at bottom
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=10,
+    fig.legend(handles, labels, loc='lower center', ncol=3, fontsize=14,
                bbox_to_anchor=(0.5, -0.02))
 
     plt.tight_layout()
     fig.subplots_adjust(bottom=0.08)  # Make room for legend
 
-    filename = f"stage1_tf_ci_grid_p{p_val}_M{M}_{freq_range_str}.pdf"
+    filename = f"stage1_tf_ci_grid_p{p_val}_M{M}_{freq_range_str}_NEW.pdf"
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         filename = os.path.join(output_dir, filename)
@@ -494,17 +494,17 @@ def main():
         plot_rmse_vs_crlb_all_params(snr_dbs, all_results, p_val, M, freq_range_str,
                                       num_params_to_plot=min(10, p_val), output_dir=output_dir, mode=mode)
 
-    # # 3. TF Confidence Interval grid plots (frequentist mode only)
-    # if mode == "bayesian":
-    #     print("\nSkipping CI plots (not available for bayesian mode)")
-    # else:
-    #     print("\nGenerating TF confidence interval grid plots...")
-    #     # Plot SNR 0-40 dB in 5x2 grid to show reconstruction improvement
-    #     snr_dbs_for_ci = [snr for snr in [0, 5, 10, 15, 20, 25, 30, 35] if snr in snr_dbs]
-    #     for p_val in p_values:
-    #         plot_CI_grid(data, p_val, M, snr_dbs_for_ci, freq_range_str, output_dir, num_samples=CI_SAMPLES)
+    # 3. TF Confidence Interval grid plots (frequentist mode only)
+    if mode == "bayesian":
+        print("\nSkipping CI plots (not available for bayesian mode)")
+    else:
+        print("\nGenerating TF confidence interval grid plots...")
+        # Plot SNR 0-40 dB in 5x2 grid to show reconstruction improvement
+        snr_dbs_for_ci = [snr for snr in [0, 5, 10, 15, 20, 25, 30, 35] if snr in snr_dbs]
+        #just plto for p = 50
+        #plot_CI_grid(data, 50, M, snr_dbs_for_ci, freq_range_str, output_dir, num_samples=CI_SAMPLES)
 
-    # print("\nDone!")
+    print("\nDone!")
 
 
 if __name__ == "__main__":

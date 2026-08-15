@@ -5,6 +5,7 @@ This module provides Pyro-based probabilistic inference for estimating
 network parameters from transfer function measurements.
 """
 
+import math
 import torch
 import pyro
 import pyro.distributions as dist
@@ -435,6 +436,21 @@ class SVIEngine:
         param_store = pyro.get_param_store()
         for name, value in best_params.items():
             param_store[name] = value.clone()
+
+        # Print final best estimates vs true values (only when verbose=True to avoid jumbled output in parallel mode)
+        if verbose:
+            print(f"\n===== FINAL BEST ESTIMATES | p = {p_val} | SNR {snr_db} | m = {m+1}/{M} | best_loss = {best_loss:.2f} =====")
+            for key in sorted_keys[:20]:
+                store_key = key.replace(".", "_") + "_loc"
+                if store_key in best_params:
+                    true_norm = self.get_true_param_value(key)
+                    loc = best_params[store_key]
+                    if hasattr(loc, 'item'):
+                        loc_val = loc.item()
+                    else:
+                        loc_val = loc
+                    sig = 1.0 / (1.0 + math.exp(-loc_val))  # sigmoid
+                    print(f"  {key:40s}: estimate = {sig:.4f} | true = {true_norm:.4f}")
 
         # Convert best_params to scalars
         best_params = {

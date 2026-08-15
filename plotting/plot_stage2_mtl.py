@@ -219,11 +219,7 @@ def compute_tf_posterior_ci_stage2(data, snr_db, num_samples=500, device='cpu'):
     tf_lower = np.percentile(tf_samples, 2.5, axis=0)
     tf_upper = np.percentile(tf_samples, 97.5, axis=0)
 
-    # Compute true TF using theta_true_dict
-    theta_true_dict = data['theta_true_dict'].item()
-    for key, val in theta_true_dict.items():
-        network_params["fault_parameters"][key]["value"] = val
-
+    # Compute true TF using network_params (fault values already set)
     cable_lengths_true = {}
     for name, info in network_params["cable_lengths"].items():
         cable_lengths_true[name] = torch.tensor(info["value"], dtype=torch.float32, device=device)
@@ -361,6 +357,10 @@ def main():
     print(f"  Frequency range: {freq_range_str}")
     print(f"  Fault parameters: {selected_keys}")
     print(f"  Mode: {mode}")
+    rmse_results = results['rmse_results']
+    crlb_results = results['crlb_results']
+    print("RMSE results", rmse_results)
+    print("CRLB results", crlb_results)
 
     # Generate plots
     print("\nGenerating plots...")

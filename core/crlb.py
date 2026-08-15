@@ -573,7 +573,7 @@ def compute_expected_data_fim(snr_db, all_thetas, scenario, forward_model,
     param_order_list, _ = get_inferred_param_order_fn()
 
     for m in range(num_samples):
-        print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
+        #print(f"{m+1} out of Monte Carlo {num_samples} for E_π[I(θ)] at {snr_db} dB")
         set_network_params_from_normalized_fn(all_thetas[m], param_order_list)
 
         # Compute H_clean for this theta
