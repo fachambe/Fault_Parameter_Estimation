@@ -302,15 +302,25 @@ def run_single_twostage_trial(m, theta_true_fault, snr_db, selected_keys_s2,
     local_svi_engine = SVIEngine(local_forward_model, local_network_params, local_config)
 
     # ===== Generate data using TRUE network params (directly, no global state swap) =====
-    # Build cable_lengths and load_params from true_network_values
+    # Build cable_lengths from true_network_values
     cable_lengths = {name: torch.tensor(val, dtype=torch.float32, device=device)
                    for name, val in true_network_values.items() if name.startswith("l_w_")}
+
+    # Build COMPLETE load_params: start from local_network_params defaults, override with true values
+    # This way we don't modify local_network_params (which svi_engine uses for inference)
     load_params = {}
+    for load_name, load_data in local_network_params["loads"].items():
+        load_params[load_name] = {}
+        for param_name, param_data in load_data.items():
+            if isinstance(param_data, dict) and "value" in param_data:
+                # Use default value from network_params
+                load_params[load_name][param_name] = torch.tensor(
+                    param_data["value"], dtype=torch.float32, device=device
+                )
+    # Override with true values from true_network_values
     for key, val in true_network_values.items():
         if "." in key:
             load_name, param_name = key.split(".")
-            if load_name not in load_params:
-                load_params[load_name] = {}
             load_params[load_name][param_name] = torch.tensor(val, dtype=torch.float32, device=device)
 
     # Build fault_params from this MC sample's true fault values
@@ -372,7 +382,7 @@ def main():
     num_steps_s1 = 2000
 
     # ==================== STAGE 2 CONFIG ====================
-    snr_dbs_s2 = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs_s2 = [0, 10, 20, 30, 40]
     num_steps_s2 = 250
 
     # ==================== SETUP ====================
