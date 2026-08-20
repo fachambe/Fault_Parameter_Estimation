@@ -27,7 +27,7 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 50 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 # 1 = Constant, 2 = Double RLC, 3 = Motor
@@ -551,8 +551,8 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_st
                 losses, params, _ = svi_engine.run_inference(
                     H1_noisy, scenario, selected_keys, std_f, num_steps,
                     snr_db=snr_db, m=m, M=M, p_val=p_val,
-                    #verbose=True,
-                    verbose=(init_val == 0.0),  # Only print for first init
+                    verbose=True,
+                    #verbose=(init_val == 0.0),  # Only print for first init
                     fault_position_init=init_val
                 )
                 final_loss = losses[-1] if losses else float('inf')
@@ -667,10 +667,11 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs = [30, 40]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
-    mode = "frequentist"
-    #mode = "bayesian"
-    num_steps = 250
+    #mode = "frequentist"
+    mode = "bayesian"
+    num_steps = 500
 
 
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
@@ -724,10 +725,10 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
-        # if snr_db <= 20:
-        #     num_steps = 250
-        # else:
-        #     num_steps = 500
+        if snr_db <= 20:
+            num_steps = 250
+        else:
+            num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
@@ -779,50 +780,50 @@ def main():
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'frequentist' or 'bayesian'.")
 
-    # ---- Save results to .npz ----
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # # ---- Save results to .npz ----
+    # os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Convert results to numpy-compatible format
-    results_to_save = {}
-    for key in selected_keys:
-        safe_key = key.replace(".", "_")
-        results_to_save[f"{safe_key}_rmse"] = np.array(rmse_results[key])
-        results_to_save[f"{safe_key}_crlb"] = np.array(crlb_results[key])
+    # # Convert results to numpy-compatible format
+    # results_to_save = {}
+    # for key in selected_keys:
+    #     safe_key = key.replace(".", "_")
+    #     results_to_save[f"{safe_key}_rmse"] = np.array(rmse_results[key])
+    #     results_to_save[f"{safe_key}_crlb"] = np.array(crlb_results[key])
 
-    # Save best_params for each SNR (for CI plotting)
-    for snr_db, best_params in best_params_per_snr.items():
-        snr_prefix = f"snr{snr_db}"
-        # Convert Pyro params to numpy
-        for param_name, param_val in best_params.items():
-            if hasattr(param_val, 'detach'):
-                results_to_save[f"{snr_prefix}_{param_name}"] = param_val.detach().cpu().numpy()
-            else:
-                results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
+    # # Save best_params for each SNR (for CI plotting)
+    # for snr_db, best_params in best_params_per_snr.items():
+    #     snr_prefix = f"snr{snr_db}"
+    #     # Convert Pyro params to numpy
+    #     for param_name, param_val in best_params.items():
+    #         if hasattr(param_val, 'detach'):
+    #             results_to_save[f"{snr_prefix}_{param_name}"] = param_val.detach().cpu().numpy()
+    #         else:
+    #             results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
-    # Extract fault_position range for filename
-    fp_range = network_params["fault_parameters"]["fault_position"]["range"]
-    fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
+    # # Extract fault_position range for filename
+    # fp_range = network_params["fault_parameters"]["fault_position"]["range"]
+    # fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
-    np.savez(
-        save_path,
-        snr_dbs=np.array(snr_dbs),
-        selected_keys=np.array(selected_keys, dtype=object),
-        frequencies=frequencies.numpy(),
-        network_params=network_params,
-        M=M,
-        ALPHA=ALPHA,
-        SEED=SEED,
-        scenario=scenario,
-        freq_range_str=freq_range_str,
-        fp_range=np.array(fp_range),
-        mode=mode,
-        **results_to_save
-    )
-    print(f"\nResults saved to: {save_path}")
+    # save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}.npz")
+    # np.savez(
+    #     save_path,
+    #     snr_dbs=np.array(snr_dbs),
+    #     selected_keys=np.array(selected_keys, dtype=object),
+    #     frequencies=frequencies.numpy(),
+    #     network_params=network_params,
+    #     M=M,
+    #     ALPHA=ALPHA,
+    #     SEED=SEED,
+    #     scenario=scenario,
+    #     freq_range_str=freq_range_str,
+    #     fp_range=np.array(fp_range),
+    #     mode=mode,
+    #     **results_to_save
+    # )
+    # print(f"\nResults saved to: {save_path}")
 
-    elapsed = time.perf_counter() - start_time
-    print(f"\nTotal time: {elapsed/60:.1f} minutes")
+    # elapsed = time.perf_counter() - start_time
+    # print(f"\nTotal time: {elapsed/60:.1f} minutes")
 
 
 if __name__ == "__main__":

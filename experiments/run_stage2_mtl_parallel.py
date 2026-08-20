@@ -28,7 +28,7 @@ LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 500 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 N_JOBS = -1  # Number of parallel jobs (-1 = use all cores)
@@ -739,11 +739,11 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    snr_dbs = [0, 5, 10, 15, 20, 25, 30, 35, 40]
+    snr_dbs = [0, 10, 20, 30, 40]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
-    num_steps = 250
+    num_steps = 500
 
 
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
@@ -797,10 +797,10 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
-        # if snr_db <= 20:
-        #     num_steps = 250
-        # else:
-        #     num_steps = 500
+        if snr_db <= 20:
+            num_steps = 250
+        else:
+            num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
@@ -872,11 +872,8 @@ def main():
             else:
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
-    # Extract fault_position range for filename
-    fp_range = network_params["fault_parameters"]["fault_position"]["range"]
-    fp_range_str = f"fp{fp_range[0]}-{fp_range[1]}"
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{fp_range_str}_{mode}_025parallel.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
@@ -888,7 +885,6 @@ def main():
         SEED=SEED,
         scenario=scenario,
         freq_range_str=freq_range_str,
-        fp_range=np.array(fp_range),
         mode=mode,
         **results_to_save
     )
