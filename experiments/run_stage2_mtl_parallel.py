@@ -67,7 +67,7 @@ device = torch.device("cpu")
 #frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
 #                              torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
 frequencies = torch.logspace(torch.log10(torch.tensor(150e3, device=device)),
-                               torch.log10(torch.tensor(10e6, device=device)), 200, device=device) #150KHz - 500KHz
+                               torch.log10(torch.tensor(500e3, device=device)), 200, device=device) #150KHz - 500KHz
 freq_range_mhz = frequencies / 1e6
 omega = 2 * torch.pi * frequencies
 num_freqs = len(omega)
