@@ -28,8 +28,9 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 OUTPUT_DIR = "stage_2_results"
 #OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.02 #Learning rate for optimizer
-LR = 0.005
+#LR = 0.02 #Learning rate for optimizer
+#LR = 0.005
+LR = 0.002
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
