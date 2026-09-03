@@ -1,9 +1,7 @@
 # crlb.py
 import torch
 import numpy as np
-import psutil, os
-from torch.func import vmap, jacfwd, jacrev
-process = psutil.Process(os.getpid())
+from torch.func import vmap, jacfwd
 
 def u_ri_single(fm, zfr, zfi, zlr, zli, l1):
     """
