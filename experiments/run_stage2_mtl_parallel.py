@@ -2,6 +2,7 @@ import sys, pathlib
 import time
 import math
 import os
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -14,6 +15,9 @@ from core.forward_mtl import MTLForwardModel
 from core.crlb import (
     compute_real_CRLB,
     compute_real_BCRLB,
+    compute_ATBCRB,
+    compute_ATBCRB2,
+    compute_ECRB,
     beta_prior_fim_closed_form,
     compute_expected_data_fim,
     key_to_tuple,
@@ -25,6 +29,7 @@ OUTPUT_DIR = "stage_2_results"
 #OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
+LR = 0.005
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
@@ -435,7 +440,6 @@ def run_single_bayesian_trial_stage2(m, theta_true_normalized, snr_db, selected_
         trial_errors: Dict {key: squared_error} for this trial
     """
     # Each worker needs its own copy of network_params to avoid race conditions
-    import copy
     local_network_params = copy.deepcopy(network_params)
 
     # Initialize local forward model and SVI engine
@@ -740,6 +744,8 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 10, 20, 30, 40]
+    #snr_dbs = [30, 40]
+    snr_dbs = [40]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
@@ -790,6 +796,8 @@ def main():
     # Initialize results storage
     rmse_results = {key: [] for key in selected_keys}
     crlb_results = {key: [] for key in selected_keys}
+    atcrlb_results = {key: [] for key in selected_keys}
+    ecrlb_results = {key: [] for key in selected_keys}
     best_params_per_snr = {}  # Store best_params for CI plotting
 
     # SNR sweep
@@ -831,28 +839,45 @@ def main():
 
         elif mode == "bayesian":
             # Bayesian: θ ~ π(θ) each run, BCRLB
+            bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
+                snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
+            )
             bcrlb_dict = compute_real_BCRLB(
                 snr_db, selected_keys, theta_bayesian, scenario, ALPHA, forward_model,
                 network_params, wrapper_fn, get_true_param_flat, get_inferred_param_order,
                 set_network_params_from_normalized, build_params_from_flat
             )
+            # at_bcrb_dict = compute_ATBCRB(
+            #                 snr_db, selected_keys, theta_bayesian, ALPHA,
+            #                 network_params, wrapper_fn, get_inferred_param_order
+            #             )
+            at_bcrb_dict2 = compute_ATBCRB2(
+                snr_db, selected_keys, theta_bayesian, ALPHA,
+                network_params, wrapper_fn, get_inferred_param_order
+            )
 
-            bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
-                snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
+            ecrb_dict = compute_ECRB(
+                snr_db, selected_keys, theta_bayesian,
+                network_params, wrapper_fn, get_inferred_param_order
             )
             print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
+            # print(f"sqrt(AT-BCRLB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict.items()})
+            print(f"sqrt(AT-BCRLB2):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict2.items()})
             print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
-
+            print(f"sqrt(ECRB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in ecrb_dict.items()})
             # Store results
             for key in selected_keys:
-                if key in bayesian_mse_dict and key in bcrlb_dict:
+                if key in bcrlb_dict:
                     rmse_results[key].append(math.sqrt(bayesian_mse_dict[key]))
                     crlb_results[key].append(math.sqrt(bcrlb_dict[key]))
+                    atcrlb_results[key].append(math.sqrt(at_bcrb_dict2[key]))
+                    ecrlb_results[key].append(math.sqrt(ecrb_dict[key]))
 
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'frequentist' or 'bayesian'.")
+    print("done")
 
-    # ---- Save results to .npz ----
+    # # ---- Save results to .npz ----
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # Convert results to numpy-compatible format
@@ -861,6 +886,8 @@ def main():
         safe_key = key.replace(".", "_")
         results_to_save[f"{safe_key}_rmse"] = np.array(rmse_results[key])
         results_to_save[f"{safe_key}_crlb"] = np.array(crlb_results[key])
+        results_to_save[f"{safe_key}_atcrlb"] = np.array(atcrlb_results[key])
+        results_to_save[f"{safe_key}_ecrlb"] = np.array(atcrlb_results[key])
 
     # Save best_params for each SNR (for CI plotting)
     for snr_db, best_params in best_params_per_snr.items():
@@ -873,7 +900,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_40dbONLY.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),

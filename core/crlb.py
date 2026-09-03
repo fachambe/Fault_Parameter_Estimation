@@ -1,6 +1,9 @@
 # crlb.py
 import torch
-from torch.func import vmap, jacfwd
+import numpy as np
+import psutil, os
+from torch.func import vmap, jacfwd, jacrev
+process = psutil.Process(os.getpid())
 
 def u_ri_single(fm, zfr, zfi, zlr, zli, l1):
     """
@@ -657,3 +660,642 @@ def compute_real_BCRLB(snr_db, selected_keys, all_thetas, scenario, alpha,
             print(f"Warning: {key} ({key_tuple}) not found in param_order_list")
 
     return bcrlb_dict
+
+
+def beta_prior_score(theta, alpha):
+    return (alpha - 1.0) * (
+        1.0 / theta - 1.0 / (1.0 - theta)
+    )
+
+def beta_prior_Lp(theta, alpha):
+    g = beta_prior_score(theta, alpha)   # [p]
+    return torch.outer(g, g)             # [p,p]
+
+def compute_real_FIM_mtl_at_theta(var_f, wrapper_fn, params_flat):
+    # Jacobian dH/dtheta at this specific parameter vector
+    J = jacfwd(wrapper_fn)(params_flat)   # [F, 2, p]
+
+    Delta = J[:, 0, :] + 1j * J[:, 1, :]
+    Delta_tilde = J[:, 0, :] - 1j * J[:, 1, :]
+
+    Delta = Delta.unsqueeze(-1)
+    Delta_tilde = Delta_tilde.unsqueeze(-1)
+
+    I_f = (
+        Delta @ Delta_tilde.transpose(-1, -2)
+        + Delta_tilde @ Delta.transpose(-1, -2)
+    )
+
+    I = ((1.0 / var_f) * I_f.sum(dim=0)).real
+    return I
+
+def compute_ATBCRB(snr_db, selected_keys, all_thetas, alpha, network_params, wrapper_fn, get_inferred_param_order_fn):
+    param_order_list, p = get_inferred_param_order_fn()
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    print(f"Computing AT-BCRB with p = {p} parameters")
+
+    def JDP_of_theta(params_flat):
+        L_P = beta_prior_Lp(params_flat, alpha)
+
+        H_ri = wrapper_fn(params_flat)
+        H_clean = H_ri[:, 0] + 1j * H_ri[:, 1]
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+        var_f = (sigpow / snr_lin).detach()
+
+        J_D = compute_real_FIM_mtl_at_theta(
+            var_f,
+            wrapper_fn,
+            params_flat
+        )
+
+        return J_D + L_P
+
+    def W_of_theta(params_flat):
+        """
+        params_flat: [p], normalized parameter vector
+        returns W(theta) = J_DP(theta)^(-1): [p,p]
+        """
+
+        J_DP = JDP_of_theta(params_flat)
+        W = torch.linalg.inv(J_DP)
+        return W
+    
+    def div_W(params_flat):
+        JW = jacfwd(W_of_theta)(params_flat) #[p, p, p] full derivative tensor of W matrix 
+        #Jw[i, j, k] = dW_{ij} / d theta_k 
+        #Divergence wants terms where j = k -> torch.diag with last 2 dimensions does this 
+        # Select JW[i,j,j] and sum over j
+        d = torch.diagonal(
+            JW,
+            dim1=1,
+            dim2=2
+        ).sum(dim=-1)                              # [p]
+
+        return d
+    num_samples = all_thetas.shape[0]
+    dtype = all_thetas.dtype
+    device = all_thetas.device
+
+    sum_W = torch.zeros((p, p), dtype=dtype, device=device)
+    sum_ddT = torch.zeros_like(sum_W)
+    sum_WDdT = torch.zeros_like(sum_W)
+    sum_DdW = torch.zeros_like(sum_W)
+
+    all_cond_JDP = []
+    all_min_eig_JDP = []
+
+    for m, theta_sample in enumerate(all_thetas):
+        if m % 25 == 0:
+            print(f"AT-BCRB theta {m+1}/{num_samples}")
+
+        params_flat = (
+            theta_sample
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
+        # Diagnostic only — once per MC sample
+        with torch.no_grad():
+            J_DP_diag = JDP_of_theta(params_flat)
+
+            eigvals = torch.linalg.eigvalsh(J_DP_diag)
+            cond = torch.linalg.cond(J_DP_diag)
+
+            all_min_eig_JDP.append(eigvals.min().item())
+            all_cond_JDP.append(cond.item())
+
+        W = W_of_theta(params_flat)
+        d = div_W(params_flat) 
+        # Jacobian of d
+        Dd = jacfwd(div_W)(params_flat)            # [p,p]
+        
+        with torch.no_grad():
+            sum_W += W
+            sum_ddT += torch.outer(d, d)
+            sum_WDdT += W @ Dd.T
+            sum_DdW += Dd @ W
+
+        del W, d, Dd, params_flat
+
+
+    E_W = sum_W / num_samples
+    E_ddT = sum_ddT / num_samples
+    E_WDdT = sum_WDdT / num_samples
+    E_DdW = sum_DdW / num_samples
+
+    
+     # ------------------------------------------------------------
+    # Paper's F matrix
+    #
+    # F = E[W]
+    #     - E[d d^T]
+    #     - E[W (∂d/∂theta)^T]
+    #     - E[(∂d/∂theta) W]
+    # ------------------------------------------------------------
+    F_AT = (
+        E_W
+        - E_ddT
+        - E_WDdT
+        - E_DdW
+    )
+    AT_BCRB = E_W @ torch.linalg.solve(F_AT, E_W)
+
+    cond_arr = np.asarray(all_cond_JDP)
+    mineig_arr = np.asarray(all_min_eig_JDP)
+
+    print("J_DP condition number stats:")
+    print("min   =", cond_arr.min())
+    print("median=", np.median(cond_arr))
+    print("mean  =", cond_arr.mean())
+    print("95%   =", np.percentile(cond_arr, 95))
+    print("99%   =", np.percentile(cond_arr, 99))
+    print("max   =", cond_arr.max())
+
+    print("J_DP minimum eigenvalue stats:")
+    print("min   =", mineig_arr.min())
+    print("median=", np.median(mineig_arr))
+    print("mean  =", mineig_arr.mean())
+
+    worst = np.argsort(cond_arr)[-10:][::-1]
+
+    print("\nWorst J_DP condition numbers:")
+    for idx in worst:
+        print(
+            f"sample {idx}: "
+            f"cond={cond_arr[idx]:.3e}, "
+            f"min_eig={mineig_arr[idx]:.3e}, "
+            f"theta={all_thetas[idx].tolist()}"
+        )
+
+    print("E_W =\n", E_W)
+    print("F_AT =\n", F_AT)
+
+    print("E_W:")
+    print(E_W)
+
+    print("E_ddT:")
+    print(E_ddT)
+
+    print("E_WDdT:")
+    print(E_WDdT)
+
+    print("E_DdW:")
+    print(E_DdW)
+
+    print("F_AT:")
+    print(F_AT)
+
+    print("eig(E_W):", torch.linalg.eigvalsh(E_W))
+    print("eig(F_AT):", torch.linalg.eigvalsh(F_AT))
+    print("eig(AT):", torch.linalg.eigvalsh(AT_BCRB))
+    print("||E_W|| =", torch.linalg.norm(E_W).item())
+    print("||E_ddT|| =", torch.linalg.norm(E_ddT).item())
+    print("||E_WDdT|| =", torch.linalg.norm(E_WDdT).item())
+    print("||E_DdW|| =", torch.linalg.norm(E_DdW).item())
+    print("sqrt diag E[W]:", torch.sqrt(torch.diag(E_W)))
+
+
+    print("AT-BCRB =")
+    print(AT_BCRB)
+    atbcrb_diag_full = torch.diag(AT_BCRB)
+
+    atbcrb_dict = {}
+
+    for key in selected_keys:
+        key_tuple = key_to_tuple(key, network_params)
+
+        if key_tuple in param_order_list:
+            idx = param_order_list.index(key_tuple)
+            atbcrb_dict[key] = atbcrb_diag_full[idx].item()
+        else:
+            print(
+                f"Warning: {key} ({key_tuple}) "
+                "not found in param_order_list"
+            )
+
+    return atbcrb_dict
+
+def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wrapper_fn, get_inferred_param_order_fn):
+    param_order_list, p = get_inferred_param_order_fn()
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    print(f"Computing AT-BCRB with p = {p} parameters")
+
+    def JD_JDP_of_theta(params_flat):
+        L_P = beta_prior_Lp(params_flat, alpha)
+
+        H_ri = wrapper_fn(params_flat)
+        H_clean = H_ri[:, 0] + 1j * H_ri[:, 1]
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+        var_f = (sigpow / snr_lin).detach()
+
+        J_D = compute_real_FIM_mtl_at_theta(
+            var_f,
+            wrapper_fn,
+            params_flat
+        )
+        J_DP = J_D + L_P
+        return J_D, J_DP 
+
+    def W_of_theta(params_flat):
+        """
+        params_flat: [p], normalized parameter vector
+        returns W(theta) = J_DP(theta)^(-1): [p,p]
+        """
+
+        _, J_DP = JD_JDP_of_theta(params_flat)
+        W = torch.linalg.inv(J_DP)
+        return W
+    
+    def div_W(params_flat):
+        JW = jacfwd(W_of_theta)(params_flat) #[p, p, p] full derivative tensor of W matrix 
+        #Jw[i, j, k] = dW_{ij} / d theta_k 
+        #Divergence wants terms where j = k -> torch.diag with last 2 dimensions does this 
+        # Select JW[i,j,j] and sum over j
+        d = torch.diagonal(
+            JW,
+            dim1=1,
+            dim2=2
+        ).sum(dim=-1)                              # [p]
+
+        return d
+    num_samples = all_thetas.shape[0]
+    dtype = all_thetas.dtype
+    device = all_thetas.device
+
+    sum_W = torch.zeros(
+        (p, p),
+        dtype=dtype,
+        device=device
+    )
+
+    sum_F = torch.zeros_like(sum_W)
+
+    all_cond_JDP = []
+    all_min_eig_JDP = []
+
+    for m, theta_sample in enumerate(all_thetas):
+        if m % 25 == 0:
+            print(f"AT-BCRB2 theta {m+1}/{num_samples}")
+
+        params_flat = (
+            theta_sample
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
+
+        J_D, J_DP = JD_JDP_of_theta(params_flat)
+        W = W_of_theta(params_flat)
+        d = div_W(params_flat) 
+        g = beta_prior_score(params_flat, alpha)   # [p]
+        q = W @ g + d          # [p]
+        F_sample = (
+            W @ J_D @ W
+            + torch.outer(q, q)
+        )                               # [p,p]
+        
+        with torch.no_grad():
+
+            J_DP_sym = 0.5 * (J_DP + J_DP.T)
+
+            eigvals = torch.linalg.eigvalsh(J_DP_sym)
+            cond = torch.linalg.cond(J_DP_sym)
+
+            all_min_eig_JDP.append(
+                eigvals.min().item()
+            )
+
+            all_cond_JDP.append(
+                cond.item()
+            )
+
+            # Accumulate WITHOUT retaining autograd graphs
+            sum_W += W.detach()
+            sum_F += F_sample.detach()
+
+
+        del J_D, J_DP, W, d, g, q, F_sample, params_flat
+    E_W = sum_W / num_samples
+    F_AT = sum_F / num_samples
+
+    eig_F = torch.linalg.eigvalsh(F_AT)
+
+    print("eig(F_AT):", eig_F)
+
+    if eig_F.min() <= 0:
+        print(
+            "WARNING: F_AT is not positive definite. "
+            "AT-BCRB may be numerically invalid."
+        )
+
+    AT_BCRB = (
+        E_W @ torch.linalg.solve(F_AT, E_W)
+    )
+    # ------------------------------------------------------------
+    # J_DP diagnostics
+    # ------------------------------------------------------------
+    cond_arr = np.asarray(all_cond_JDP)
+    mineig_arr = np.asarray(all_min_eig_JDP)
+
+    print("\nJ_DP condition number stats:")
+    print("min    =", cond_arr.min())
+    print("median =", np.median(cond_arr))
+    print("mean   =", cond_arr.mean())
+    print("95%    =", np.percentile(cond_arr, 95))
+    print("99%    =", np.percentile(cond_arr, 99))
+    print("max    =", cond_arr.max())
+
+    print("\nJ_DP minimum eigenvalue stats:")
+    print("min    =", mineig_arr.min())
+    print("median =", np.median(mineig_arr))
+    print("mean   =", mineig_arr.mean())
+
+    worst = np.argsort(cond_arr)[-10:][::-1]
+
+    print("\nWorst J_DP condition numbers:")
+
+    for idx in worst:
+        print(
+            f"sample {idx}: "
+            f"cond={cond_arr[idx]:.3e}, "
+            f"min_eig={mineig_arr[idx]:.3e}, "
+            f"theta={all_thetas[idx].tolist()}"
+        )
+
+    # ------------------------------------------------------------
+    # Main diagnostics
+    # ------------------------------------------------------------
+    print("\nE_W =")
+    print(E_W)
+
+    print("\nF_AT =")
+    print(F_AT)
+
+    print("\nAT_BCRB =")
+    print(AT_BCRB)
+
+    print("\neig(E_W):")
+    print(torch.linalg.eigvalsh(E_W))
+
+    print("\neig(F_AT):")
+    print(torch.linalg.eigvalsh(F_AT))
+
+    print("\neig(AT_BCRB):")
+    print(torch.linalg.eigvalsh(AT_BCRB))
+
+    print("\n||E_W|| =")
+    print(torch.linalg.norm(E_W).item())
+
+    print("\n||F_AT|| =")
+    print(torch.linalg.norm(F_AT).item())
+
+    print("\nsqrt diag E[W] =")
+    print(torch.sqrt(torch.diag(E_W)))
+
+    print("\nsqrt diag AT-BCRB =")
+    print(torch.sqrt(torch.diag(AT_BCRB)))
+
+    # ------------------------------------------------------------
+    # Return requested diagonal elements
+    # ------------------------------------------------------------
+    atbcrb_diag_full = torch.diag(AT_BCRB)
+
+    atbcrb_dict = {}
+
+    for key in selected_keys:
+
+        key_tuple = key_to_tuple(
+            key,
+            network_params
+        )
+
+        if key_tuple in param_order_list:
+
+            idx = param_order_list.index(
+                key_tuple
+            )
+
+            atbcrb_dict[key] = (
+                atbcrb_diag_full[idx].item()
+            )
+
+        else:
+
+            print(
+                f"Warning: {key} ({key_tuple}) "
+                "not found in param_order_list"
+            )
+
+    return atbcrb_dict
+
+
+def compute_ECRB(
+    snr_db,
+    selected_keys,
+    all_thetas,
+    network_params,
+    wrapper_fn,
+    get_inferred_param_order_fn
+):
+    """
+    Compute the Expected Cramer-Rao Bound (ECRB):
+
+        ECRB = E_theta[ J_D(theta)^(-1) ]
+
+    where J_D(theta) is the pointwise data Fisher information matrix.
+
+    The expectation over theta is approximated using the samples in
+    all_thetas.
+    """
+
+    param_order_list, p = get_inferred_param_order_fn()
+
+    snr_lin = 10.0 ** (snr_db / 10.0)
+
+    num_samples = all_thetas.shape[0]
+    dtype = all_thetas.dtype
+    device = all_thetas.device
+
+    print(f"Computing ECRB with p = {p} parameters")
+
+    # ------------------------------------------------------------
+    # Monte Carlo accumulator
+    #
+    # ECRB = E_theta[J_D(theta)^(-1)]
+    # ------------------------------------------------------------
+    sum_JD_inv = torch.zeros(
+        (p, p),
+        dtype=dtype,
+        device=device
+    )
+
+    # Diagnostics
+    all_cond_JD = []
+    all_min_eig_JD = []
+
+    # ------------------------------------------------------------
+    # Monte Carlo expectation over theta
+    # ------------------------------------------------------------
+    for m, theta_sample in enumerate(all_thetas):
+
+        if m % 25 == 0:
+            print(f"ECRB theta {m+1}/{num_samples}")
+
+        params_flat = (
+            theta_sample
+            .detach()
+            .clone()
+        )
+
+        # --------------------------------------------------------
+        # Signal power at this theta
+        #
+        # Noise variance is selected to give the requested SNR
+        # at this particular theta.
+        # --------------------------------------------------------
+        H_ri = wrapper_fn(params_flat)
+
+        H_clean = (
+            H_ri[:, 0]
+            + 1j * H_ri[:, 1]
+        )
+
+        sigpow = torch.mean(
+            torch.abs(H_clean) ** 2
+        )
+
+        var_f = sigpow / snr_lin
+
+        # --------------------------------------------------------
+        # Pointwise data Fisher information
+        #
+        # J_D(theta)
+        # --------------------------------------------------------
+        J_D = compute_real_FIM_mtl_at_theta(
+            var_f,
+            wrapper_fn,
+            params_flat
+        )
+
+        # Numerical symmetry cleanup for diagnostics/inversion
+        J_D = 0.5 * (
+            J_D + J_D.T
+        )
+
+        # --------------------------------------------------------
+        # Diagnostics
+        # --------------------------------------------------------
+        with torch.no_grad():
+
+            eigvals = torch.linalg.eigvalsh(J_D)
+            cond = torch.linalg.cond(J_D)
+
+            all_min_eig_JD.append(
+                eigvals.min().item()
+            )
+
+            all_cond_JD.append(
+                cond.item()
+            )
+
+        # --------------------------------------------------------
+        # Pointwise CRLB
+        #
+        # CRLB(theta) = J_D(theta)^(-1)
+        # --------------------------------------------------------
+        J_D_inv = torch.linalg.inv(J_D)
+
+        # --------------------------------------------------------
+        # Accumulate expectation
+        # --------------------------------------------------------
+        with torch.no_grad():
+            sum_JD_inv += J_D_inv
+
+        del J_D
+        del J_D_inv
+        del params_flat
+
+    # ------------------------------------------------------------
+    # Expected CRLB
+    #
+    # ECRB = E_theta[J_D(theta)^(-1)]
+    # ------------------------------------------------------------
+    ECRB = sum_JD_inv / num_samples
+
+    # Numerical symmetry cleanup
+    ECRB = 0.5 * (
+        ECRB + ECRB.T
+    )
+
+    # ------------------------------------------------------------
+    # Diagnostics
+    # ------------------------------------------------------------
+    cond_arr = np.asarray(all_cond_JD)
+    mineig_arr = np.asarray(all_min_eig_JD)
+
+    print("\nJ_D condition number stats:")
+    print("min    =", cond_arr.min())
+    print("median =", np.median(cond_arr))
+    print("mean   =", cond_arr.mean())
+    print("95%    =", np.percentile(cond_arr, 95))
+    print("99%    =", np.percentile(cond_arr, 99))
+    print("max    =", cond_arr.max())
+
+    print("\nJ_D minimum eigenvalue stats:")
+    print("min    =", mineig_arr.min())
+    print("median =", np.median(mineig_arr))
+    print("mean   =", mineig_arr.mean())
+
+    worst = np.argsort(cond_arr)[-10:][::-1]
+
+    print("\nWorst J_D condition numbers:")
+
+    for idx in worst:
+        print(
+            f"sample {idx}: "
+            f"cond={cond_arr[idx]:.3e}, "
+            f"min_eig={mineig_arr[idx]:.3e}, "
+            f"theta={all_thetas[idx].tolist()}"
+        )
+
+    print("\nECRB =")
+    print(ECRB)
+
+    print("\neig(ECRB) =")
+    print(torch.linalg.eigvalsh(ECRB))
+
+    print("\nsqrt diag ECRB =")
+    print(torch.sqrt(torch.diag(ECRB)))
+
+    # ------------------------------------------------------------
+    # Return requested diagonal elements
+    # ------------------------------------------------------------
+    ecrb_diag_full = torch.diag(ECRB)
+
+    ecrb_dict = {}
+
+    for key in selected_keys:
+
+        key_tuple = key_to_tuple(
+            key,
+            network_params
+        )
+
+        if key_tuple in param_order_list:
+
+            idx = param_order_list.index(
+                key_tuple
+            )
+
+            ecrb_dict[key] = (
+                ecrb_diag_full[idx].item()
+            )
+
+        else:
+
+            print(
+                f"Warning: {key} ({key_tuple}) "
+                "not found in param_order_list"
+            )
+
+    return ecrb_dict

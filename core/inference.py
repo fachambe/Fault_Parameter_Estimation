@@ -390,12 +390,32 @@ class SVIEngine:
             param_store = pyro.get_param_store()
             print(f"\n===== STEP 0 (INITIALIZATION) =====")
             for key in sorted_keys[:20]:
-                store_key = key.replace(".", "_") + "_loc"
-                if store_key in param_store:
+                base_key = key.replace(".", "_")
+                loc_key = base_key + "_loc"
+                scale_key = base_key + "_scale"
+
+                if loc_key in param_store and scale_key in param_store:
                     true_norm = self.get_true_param_value(key)
-                    loc = param_store[store_key].detach()
-                    sig = torch.sigmoid(loc)
-                    print(f"{key:40s} (sigmoid) = {sig.item():.4f} | True = {true_norm:.4f}")
+                    loc = param_store[loc_key].detach()
+                    scale = param_store[scale_key].detach()
+                    # Current transformed variational location
+                    transformed_loc = torch.sigmoid(loc)
+
+                    # Monte Carlo posterior mean/std in theta-space
+                    eps = torch.randn(1000, device=loc.device)
+                    z_samples = loc + scale * eps
+                    theta_samples = torch.sigmoid(z_samples)
+
+                    post_mean = theta_samples.mean()
+                    post_std = theta_samples.std()
+
+                    print(
+                        f"{key:30s} "
+                        f"sig(loc)={transformed_loc.item():.5f} | "
+                        f"post mean={post_mean.item():.5f} | "
+                        f"post std={post_std.item():.5f} | "
+                        f"true={true_norm:.5f}"
+                    )
 
         losses = []
         best_loss = float("inf")
@@ -425,12 +445,32 @@ class SVIEngine:
                 print("\n Top 20 Most Sensitive Parameters")
                 param_store = pyro.get_param_store()
                 for key in sorted_keys[:20]:
-                    store_key = key.replace(".", "_") + "_loc"
-                    if store_key in param_store:
+                    base_key = key.replace(".", "_")
+                    loc_key = base_key + "_loc"
+                    scale_key = base_key + "_scale"
+    
+                    if loc_key in param_store and scale_key in param_store:
                         true_norm = self.get_true_param_value(key)
-                        loc = param_store[store_key].detach()
-                        sig = torch.sigmoid(loc)
-                        print(f"{key:40s} (sigmoid) = {sig.item():.4f} | True = {true_norm:.4f}")
+                        loc = param_store[loc_key].detach()
+                        scale = param_store[scale_key].detach()
+                        # Current transformed variational location
+                        transformed_loc = torch.sigmoid(loc)
+    
+                        # Monte Carlo posterior mean/std in theta-space
+                        eps = torch.randn(1000, device=loc.device)
+                        z_samples = loc + scale * eps
+                        theta_samples = torch.sigmoid(z_samples)
+    
+                        post_mean = theta_samples.mean()
+                        post_std = theta_samples.std()
+    
+                        print(
+                            f"{key:30s} "
+                            f"sig(loc)={transformed_loc.item():.5f} | "
+                            f"post mean={post_mean.item():.5f} | "
+                            f"post std={post_std.item():.5f} | "
+                            f"true={true_norm:.5f}"
+                        )
 
         # Restore best params into Pyro param store
         param_store = pyro.get_param_store()
