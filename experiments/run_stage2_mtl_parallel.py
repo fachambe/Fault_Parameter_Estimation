@@ -29,8 +29,8 @@ OUTPUT_DIR = "stage_2_results"
 #OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 #LR = 0.02 #Learning rate for optimizer
-#LR = 0.005
-LR = 0.002
+LR = 0.005
+#LR = 0.002
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
@@ -864,7 +864,7 @@ def main():
                 network_params, wrapper_fn, get_inferred_param_order
             )
             print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
-            # print(f"sqrt(AT-BCRLB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict.items()})
+            #print(f"sqrt(AT-BCRLB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict.items()})
             print(f"sqrt(AT-BCRLB2):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict2.items()})
             print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
             print(f"sqrt(ECRB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in ecrb_dict.items()})
@@ -902,7 +902,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_60dbONLY_LR0002.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_60dbONLY_LR0005.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
