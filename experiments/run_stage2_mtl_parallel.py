@@ -34,7 +34,7 @@ LR = 0.002
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 500 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 N_JOBS = -1  # Number of parallel jobs (-1 = use all cores)
@@ -674,6 +674,7 @@ def calculate_bayesian_mse_monte_carlo(snr_db, selected_keys, all_thetas, num_st
         for m in range(M)
     )
 
+
     # Aggregate results
     squared_errors = {key: [] for key in selected_keys}
     for trial_errors in results:
@@ -746,11 +747,11 @@ def main():
     start_time = time.perf_counter()
     snr_dbs = [0, 10, 20, 30, 40]
     #snr_dbs = [30, 40]
-    snr_dbs = [40]
+    snr_dbs = [60]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
-    num_steps = 500
+    num_steps = 750
 
 
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
@@ -806,10 +807,10 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
-        if snr_db <= 20:
-            num_steps = 250
-        else:
-            num_steps = 500
+        # if snr_db <= 20:
+        #     num_steps = 250
+        # else:
+        #     num_steps = 500
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
@@ -840,6 +841,7 @@ def main():
 
         elif mode == "bayesian":
             # Bayesian: θ ~ π(θ) each run, BCRLB
+
             bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
                 snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
             )
@@ -856,7 +858,7 @@ def main():
                 snr_db, selected_keys, theta_bayesian, ALPHA,
                 network_params, wrapper_fn, get_inferred_param_order
             )
-
+            
             ecrb_dict = compute_ECRB(
                 snr_db, selected_keys, theta_bayesian,
                 network_params, wrapper_fn, get_inferred_param_order
@@ -876,8 +878,7 @@ def main():
 
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'frequentist' or 'bayesian'.")
-    print("done")
-
+    
     # # ---- Save results to .npz ----
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -901,7 +902,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_40dbONLY_LR0002.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_60dbONLY_LR0002.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),

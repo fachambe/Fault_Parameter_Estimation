@@ -930,10 +930,11 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
 
     all_cond_JDP = []
     all_min_eig_JDP = []
+    F_contrib_norms = []
 
     for m, theta_sample in enumerate(all_thetas):
-        if m % 25 == 0:
-            print(f"AT-BCRB2 theta {m+1}/{num_samples}")
+        #if m % 25 == 0:
+        print(f"AT-BCRB2 theta {m+1}/{num_samples}")
 
         params_flat = (
             theta_sample
@@ -943,6 +944,32 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
         )
 
         J_D, J_DP = JD_JDP_of_theta(params_flat)
+
+        L_P = beta_prior_Lp(params_flat, alpha)
+        with torch.no_grad():
+            JD_sym = 0.5 * (J_D + J_D.T)
+            LP_sym = 0.5 * (L_P + L_P.T)
+            JDP_sym = 0.5 * (J_DP + J_DP.T)
+
+            eig_JD = torch.linalg.eigvalsh(JD_sym)
+            eig_LP = torch.linalg.eigvalsh(LP_sym)
+            eig_JDP = torch.linalg.eigvalsh(JDP_sym)
+
+            cond_JD = torch.linalg.cond(JD_sym)
+            cond_JDP = torch.linalg.cond(JDP_sym)
+
+            print(f"\n--- sample {m} ---")
+            print("theta =", params_flat.detach().cpu().numpy())
+
+            print("eig(J_D)  =", eig_JD.cpu().numpy())
+            print("cond(J_D) =", cond_JD.item())
+
+            print("eig(L_P)  =", eig_LP.cpu().numpy())
+            print("||s||^2   =", eig_LP[-1].item())
+
+            print("eig(J_DP) =", eig_JDP.cpu().numpy())
+            print("cond(J_DP)=", cond_JDP.item())
+
         W = W_of_theta(params_flat)
         d = div_W(params_flat) 
         g = beta_prior_score(params_flat, alpha)   # [p]
@@ -951,113 +978,28 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
             W @ J_D @ W
             + torch.outer(q, q)
         )                               # [p,p]
+
+        with torch.no_grad():
+            print("||W||     =", torch.linalg.norm(W).item())
+            print("||div W|| =", torch.linalg.norm(d).item())
+            print("||F_m||   =", torch.linalg.norm(F_sample).item())
         
         with torch.no_grad():
-
-            J_DP_sym = 0.5 * (J_DP + J_DP.T)
-
-            eigvals = torch.linalg.eigvalsh(J_DP_sym)
-            cond = torch.linalg.cond(J_DP_sym)
-
-            all_min_eig_JDP.append(
-                eigvals.min().item()
-            )
-
-            all_cond_JDP.append(
-                cond.item()
-            )
-
             # Accumulate WITHOUT retaining autograd graphs
             sum_W += W.detach()
             sum_F += F_sample.detach()
-
-
         del J_D, J_DP, W, d, g, q, F_sample, params_flat
+
+    
     E_W = sum_W / num_samples
     F_AT = sum_F / num_samples
 
-    eig_F = torch.linalg.eigvalsh(F_AT)
-
-    print("eig(F_AT):", eig_F)
-
-    if eig_F.min() <= 0:
-        print(
-            "WARNING: F_AT is not positive definite. "
-            "AT-BCRB may be numerically invalid."
-        )
 
     AT_BCRB = (
         E_W @ torch.linalg.solve(F_AT, E_W)
     )
-    # ------------------------------------------------------------
-    # J_DP diagnostics
-    # ------------------------------------------------------------
-    cond_arr = np.asarray(all_cond_JDP)
-    mineig_arr = np.asarray(all_min_eig_JDP)
 
-    print("\nJ_DP condition number stats:")
-    print("min    =", cond_arr.min())
-    print("median =", np.median(cond_arr))
-    print("mean   =", cond_arr.mean())
-    print("95%    =", np.percentile(cond_arr, 95))
-    print("99%    =", np.percentile(cond_arr, 99))
-    print("max    =", cond_arr.max())
-
-    print("\nJ_DP minimum eigenvalue stats:")
-    print("min    =", mineig_arr.min())
-    print("median =", np.median(mineig_arr))
-    print("mean   =", mineig_arr.mean())
-
-    worst = np.argsort(cond_arr)[-10:][::-1]
-
-    print("\nWorst J_DP condition numbers:")
-
-    for idx in worst:
-        print(
-            f"sample {idx}: "
-            f"cond={cond_arr[idx]:.3e}, "
-            f"min_eig={mineig_arr[idx]:.3e}, "
-            f"theta={all_thetas[idx].tolist()}"
-        )
-
-    # ------------------------------------------------------------
-    # Main diagnostics
-    # ------------------------------------------------------------
-    print("\nE_W =")
-    print(E_W)
-
-    print("\nF_AT =")
-    print(F_AT)
-
-    print("\nAT_BCRB =")
-    print(AT_BCRB)
-
-    print("\neig(E_W):")
-    print(torch.linalg.eigvalsh(E_W))
-
-    print("\neig(F_AT):")
-    print(torch.linalg.eigvalsh(F_AT))
-
-    print("\neig(AT_BCRB):")
-    print(torch.linalg.eigvalsh(AT_BCRB))
-
-    print("\n||E_W|| =")
-    print(torch.linalg.norm(E_W).item())
-
-    print("\n||F_AT|| =")
-    print(torch.linalg.norm(F_AT).item())
-
-    print("\nsqrt diag E[W] =")
-    print(torch.sqrt(torch.diag(E_W)))
-
-    print("\nsqrt diag AT-BCRB =")
-    print(torch.sqrt(torch.diag(AT_BCRB)))
-
-    # ------------------------------------------------------------
-    # Return requested diagonal elements
-    # ------------------------------------------------------------
     atbcrb_diag_full = torch.diag(AT_BCRB)
-
     atbcrb_dict = {}
 
     for key in selected_keys:
