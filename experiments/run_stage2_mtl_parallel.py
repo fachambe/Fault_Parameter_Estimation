@@ -28,7 +28,7 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 OUTPUT_DIR = "stage_2_results"
 #OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.04 #Learning rate for optimizer
+LR = 0.05 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
@@ -902,7 +902,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_LR004_full.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_LR005_full.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
