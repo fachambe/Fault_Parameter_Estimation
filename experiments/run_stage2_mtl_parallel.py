@@ -28,13 +28,11 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 OUTPUT_DIR = "stage_2_results"
 #OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.1 #Learning rate for optimizer
-#LR = 0.005
-#LR = 0.002
+LR = 0.03 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 500 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 N_JOBS = -1  # Number of parallel jobs (-1 = use all cores)
@@ -745,9 +743,9 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    snr_dbs = [0, 10, 20, 30, 40]
+    snr_dbs = [0, 10, 20, 30, 40, 50, 60]
     #snr_dbs = [30, 40]
-    snr_dbs = [60]
+    #snr_dbs = [60]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
@@ -807,10 +805,12 @@ def main():
         print(f"\n{'='*50}")
         print(f"Stage 2 | SNR = {snr_db} dB | Mode = {mode}")
         print('='*50)
-        # if snr_db <= 20:
-        #     num_steps = 250
-        # else:
-        #     num_steps = 500
+        if snr_db <= 20:
+            num_steps = 250
+        elif snr_db <= 40: 
+            num_steps = 500
+        else:
+            num_steps = 750
 
         snr_lin = 10.0 ** (snr_db / 10.0)
         var_f = sigpow / snr_lin
@@ -902,7 +902,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_60dbONLY_LR01.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_LR003_full.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
