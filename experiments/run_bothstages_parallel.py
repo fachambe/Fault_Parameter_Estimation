@@ -382,8 +382,8 @@ def main():
     num_steps_s1 = 2000
 
     # ==================== STAGE 2 CONFIG ====================
-    snr_dbs_s2 = [0, 10, 20, 30, 40]
-    num_steps_s2 = 250
+    snr_dbs_s2 = [0, 10, 20, 30, 35, 40]
+    num_steps_s2 = 500
 
     # ==================== SETUP ====================
     total_params, load_types = generate_load_parameters_deterministic(network_params, FIXED_LOAD_TYPES)
@@ -498,6 +498,12 @@ def main():
         print('='*50)
         print(f"Running {M} MC trials in parallel...")
 
+        if snr_db <= 20:
+            num_steps_s2 = 250
+        else:
+            num_steps_s2 = 500
+
+
         # Run trials in parallel using joblib
         results = Parallel(n_jobs=N_JOBS, backend='loky', verbose=10)(
             delayed(run_single_twostage_trial)(
@@ -559,7 +565,7 @@ def main():
         safe_key = key.replace(".", "_")
         save_data[f"{safe_key}_rmse"] = np.array(rmse_results[key])
 
-    save_path = os.path.join(OUTPUT_DIR, f"bothstages_parallel_{freq_range_str}_M{M}_S1snr{snr_db_s1}.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"bothstages_parallel_{freq_range_str}_M{M}_S1snr{snr_db_s1}_500steps.npz")
     np.savez(save_path, **save_data)
     print(f"\nResults saved to: {save_path}")
 
