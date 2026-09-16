@@ -28,11 +28,11 @@ torch.set_printoptions(precision=8)  # Show 8 decimal places
 
 OUTPUT_DIR = "stage_2_results"
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
-LR = 0.04 #Learning rate for optimizer
+LR = 0.031 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 500 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 N_JOBS = -1  # Number of parallel jobs (-1 = use all cores)
@@ -743,9 +743,9 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    snr_dbs = [0, 10, 20, 30, 40, 50, 60]
+    #snr_dbs = [0, 10, 20, 30, 40, 50, 60]
     #snr_dbs = [30, 40]
-    #snr_dbs = [60]
+    snr_dbs = [60]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
@@ -843,9 +843,9 @@ def main():
         elif mode == "bayesian":
             # Bayesian: θ ~ π(θ) each run, BCRLB
 
-            # bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
-            #     snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
-            # )
+            bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
+                snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
+            )
             # bcrlb_dict = compute_real_BCRLB(
             #     snr_db, selected_keys, theta_bayesian, scenario, ALPHA, forward_model,
             #     network_params, wrapper_fn, get_true_param_flat, get_inferred_param_order,
@@ -864,23 +864,23 @@ def main():
             #     snr_db, selected_keys, theta_bayesian,
             #     network_params, wrapper_fn, get_inferred_param_order
             # )
-            newbound_dict = compute_newbound(
-                snr_db, selected_keys, theta_bayesian, ALPHA,
-                network_params, wrapper_fn, get_inferred_param_order
-            )
-            #print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
+            # newbound_dict = compute_newbound(
+            #     snr_db, selected_keys, theta_bayesian, ALPHA,
+            #     network_params, wrapper_fn, get_inferred_param_order
+            # )
+            print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
             #print(f"sqrt(AT-BCRLB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict.items()})
             #print(f"sqrt(AT-BCRLB2):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict2.items()})
             #print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
-            print(f"New Bound:", {k: f"{math.sqrt(v):.4f}" for k, v in newbound_dict.items()})
+            #print(f"New Bound:", {k: f"{math.sqrt(v):.4f}" for k, v in newbound_dict.items()})
             #print(f"sqrt(ECRB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in ecrb_dict.items()})
             # Store results
             for key in selected_keys:
-                if key in newbound_dict:
-                    #rmse_results[key].append(math.sqrt(bayesian_mse_dict[key]))
+                #if key in newbound_dict:
+                rmse_results[key].append(math.sqrt(bayesian_mse_dict[key]))
                     #crlb_results[key].append(math.sqrt(bcrlb_dict[key]))
                     #atcrlb_results[key].append(math.sqrt(at_bcrb_dict2[key]))
-                    newbound_results[key].append(math.sqrt(newbound_dict[key]))
+                    #newbound_results[key].append(math.sqrt(newbound_dict[key]))
                     #ecrlb_results[key].append(math.sqrt(ecrb_dict[key]))
 
         else:
@@ -910,7 +910,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_newboundonly.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_60dbONLY_LR0031.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
