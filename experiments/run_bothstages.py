@@ -19,7 +19,6 @@ from core.inference import SVIEngine, InferenceConfig
 torch.set_printoptions(precision=8)  # Show 8 decimal places
 
 OUTPUT_DIR = "both_stages_results"
-#OUTPUT_DIR = "two_stage_results_S1=20dB_bayesian" #Name of output folder to save plots
 OPTIMIZER = "Adam"  # "Adam" or "Adagrad"
 LR = 0.02 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
