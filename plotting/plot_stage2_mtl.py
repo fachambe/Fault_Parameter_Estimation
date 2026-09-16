@@ -36,21 +36,24 @@ def load_stage2_results(npz_path):
 
     rmse_results = {}
     crlb_results = {}
+    atcrlb_results = {}
     for key in selected_keys:
         safe_key = key.replace(".", "_")
         rmse_results[key] = data[f"{safe_key}_rmse"]
         crlb_results[key] = data[f"{safe_key}_crlb"]
+        atcrlb_results[key] = data[f"{safe_key}_atcrlb"]
 
     results = {
         'selected_keys': selected_keys,
         'rmse_results': rmse_results,
         'crlb_results': crlb_results,
+        'atcrlb_results': atcrlb_results
     }
 
     return dict(data), results
 
 
-def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, fp_range, output_dir=None, mode="frequentist"):
+def plot_fault_params_rmse_vs_crlb(snr_dbs, results, newbound_results, M, freq_range_str, alpha, output_dir=None, mode="frequentist"):
     """
     Plot RMSE vs CRLB for the 3 fault parameters in a 1x3 layout.
 
@@ -70,6 +73,8 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
     if mode == "bayesian":
         rmse_label = "BRMSE"
         crlb_label = r"$\sqrt{\mathrm{BCRLB}}$"
+        atcrlb_label = r"$\sqrt{\mathrm{AT-BCRLB}}$"
+        newbound_label = r"$\sqrt{\mathrm{New Bound}}$"
     else:
         rmse_label = "RMSE"
         crlb_label = r"$\sqrt{\mathrm{CRLB}}$"
@@ -77,7 +82,7 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
     selected_keys = results['selected_keys']
     rmse_results = results['rmse_results']
     crlb_results = results['crlb_results']
-
+    atcrlb_results = results['atcrlb_results']
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
@@ -94,7 +99,8 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
         s = scale.get(key, 1.0)
         rmse_vals = rmse_results[key] * s
         crlb_vals = crlb_results[key] * s
-
+        atcrlb_vals = atcrlb_results[key] * s
+        newbound_vals = newbound_results[key] * s
         # Panel label
         ax.text(
             0.5, 1.05,
@@ -107,6 +113,8 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
 
         ax.plot(snr_dbs, rmse_vals, 'bo-', label=rmse_label, markersize=6)
         ax.plot(snr_dbs, crlb_vals, 'r--', label=crlb_label, linewidth=2)
+        ax.plot(snr_dbs, atcrlb_vals, 'g--', label=atcrlb_label, linewidth=2)
+        ax.plot(snr_dbs, newbound_vals, 'c-', label=newbound_label, linewidth=2)
 
         ax.set_xlabel('SNR (dB)', fontsize=13)
         ax.set_ylabel(units.get(key, 'Error'), fontsize=13)
@@ -122,13 +130,13 @@ def plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, f
         ax.legend(fontsize=10)
 
     plt.tight_layout()
-
-    filename = f"stage2_fault_rmse_crlb_M{M}_{freq_range_str}_{mode}_{alpha}_{fp_range}_025all.pdf"
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        filename = os.path.join(output_dir, filename)
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    print(f"Saved: {filename}")
+    plt.show()
+    # filename = f"stage2_fault_rmse_crlb_M{M}_{freq_range_str}_{mode}_{alpha}_{fp_range}_025all.pdf"
+    # if output_dir:
+    #     os.makedirs(output_dir, exist_ok=True)
+    #     filename = os.path.join(output_dir, filename)
+    #plt.savefig(filename, dpi=300, bbox_inches='tight')
+    #print(f"Saved: {filename}")
     plt.close()
 
 
@@ -343,7 +351,7 @@ def main():
     freq_range_str = str(data['freq_range_str'])
     selected_keys = results['selected_keys']
     alpha = data['ALPHA']
-    fp_range = data['fp_range']
+    #fp_range = data['fp_range']
 
     # Detect mode from npz 
     mode = str(data['mode']) if 'mode' in data else "frequentist"
@@ -359,14 +367,31 @@ def main():
     print(f"  Mode: {mode}")
     rmse_results = results['rmse_results']
     crlb_results = results['crlb_results']
-    print("RMSE results", rmse_results)
-    print("CRLB results", crlb_results)
+    atcrlb_results = results['atcrlb_results']
+    print("BRMSE results", rmse_results)
+    print("BCRLB results", crlb_results)
+    print("ATBCRLB results", atcrlb_results)
+    newbound_results = {
+    "fault_position": np.array([
+        0.1533, 0.1400, 0.0990, 0.0483, 0.0190, 0.0069, 0.0023
+    ]),
+    "Z_fault_real": np.array([
+        0.1701, 0.1615, 0.1311, 0.0872, 0.0435, 0.0171, 0.0056
+    ]),
+    "Z_fault_imag": np.array([
+        0.1881, 0.1860, 0.1801, 0.1642, 0.1297, 0.0702, 0.0260
+    ])
+}
+    
 
+    
+    #print("DONE")
+    #sys.exit()
     # Generate plots
     print("\nGenerating plots...")
 
     # 1. RMSE vs CRLB for fault parameters
-    plot_fault_params_rmse_vs_crlb(snr_dbs, results, M, freq_range_str, alpha, fp_range, output_dir, mode)
+    plot_fault_params_rmse_vs_crlb(snr_dbs, results, newbound_results, M, freq_range_str, alpha, output_dir, mode)
 
     # 2. TF Confidence Interval grid plots (frequentist mode only)
     if mode == "bayesian":

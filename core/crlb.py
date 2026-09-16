@@ -946,29 +946,29 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
         J_D, J_DP = JD_JDP_of_theta(params_flat)
 
         L_P = beta_prior_Lp(params_flat, alpha)
-        with torch.no_grad():
-            JD_sym = 0.5 * (J_D + J_D.T)
-            LP_sym = 0.5 * (L_P + L_P.T)
-            JDP_sym = 0.5 * (J_DP + J_DP.T)
+        # with torch.no_grad():
+        #     JD_sym = 0.5 * (J_D + J_D.T)
+        #     LP_sym = 0.5 * (L_P + L_P.T)
+        #     JDP_sym = 0.5 * (J_DP + J_DP.T)
 
-            eig_JD = torch.linalg.eigvalsh(JD_sym)
-            eig_LP = torch.linalg.eigvalsh(LP_sym)
-            eig_JDP = torch.linalg.eigvalsh(JDP_sym)
+        #     eig_JD = torch.linalg.eigvalsh(JD_sym)
+        #     eig_LP = torch.linalg.eigvalsh(LP_sym)
+        #     eig_JDP = torch.linalg.eigvalsh(JDP_sym)
 
-            cond_JD = torch.linalg.cond(JD_sym)
-            cond_JDP = torch.linalg.cond(JDP_sym)
+        #     cond_JD = torch.linalg.cond(JD_sym)
+        #     cond_JDP = torch.linalg.cond(JDP_sym)
 
-            print(f"\n--- sample {m} ---")
-            print("theta =", params_flat.detach().cpu().numpy())
+        #     print(f"\n--- sample {m} ---")
+        #     print("theta =", params_flat.detach().cpu().numpy())
 
-            print("eig(J_D)  =", eig_JD.cpu().numpy())
-            print("cond(J_D) =", cond_JD.item())
+        #     print("eig(J_D)  =", eig_JD.cpu().numpy())
+        #     print("cond(J_D) =", cond_JD.item())
 
-            print("eig(L_P)  =", eig_LP.cpu().numpy())
-            print("||s||^2   =", eig_LP[-1].item())
+        #     print("eig(L_P)  =", eig_LP.cpu().numpy())
+        #     print("||s||^2   =", eig_LP[-1].item())
 
-            print("eig(J_DP) =", eig_JDP.cpu().numpy())
-            print("cond(J_DP)=", cond_JDP.item())
+        #     print("eig(J_DP) =", eig_JDP.cpu().numpy())
+        #     print("cond(J_DP)=", cond_JDP.item())
 
         W = W_of_theta(params_flat)
         d = div_W(params_flat) 
@@ -1028,7 +1028,133 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
 
     return atbcrb_dict
 
+def compute_newbound(snr_db, selected_keys, all_thetas, alpha, network_params, wrapper_fn, get_inferred_param_order_fn):
+    param_order_list, p = get_inferred_param_order_fn()
+    snr_lin = 10.0 ** (snr_db / 10.0)
+    print(f"Computing AT-BCRB with p = {p} parameters")
 
+    def JD_JDP_of_theta(params_flat):
+        L_P = beta_prior_Lp(params_flat, alpha)
+
+        H_ri = wrapper_fn(params_flat)
+        H_clean = H_ri[:, 0] + 1j * H_ri[:, 1]
+        sigpow = torch.mean(torch.abs(H_clean)**2)
+        var_f = (sigpow / snr_lin).detach()
+
+        J_D = compute_real_FIM_mtl_at_theta(
+            var_f,
+            wrapper_fn,
+            params_flat
+        )
+        J_DP = J_D + L_P
+        return J_D, J_DP 
+
+    def W_of_theta(params_flat):
+        """
+        params_flat: [p], normalized parameter vector
+        returns W(theta) = J_DP(theta)^(-1): [p,p]
+        """
+
+        J_D, _ = JD_JDP_of_theta(params_flat)
+        # Compute J_π (prior FIM)
+        J_pi = beta_prior_fim_closed_form(alpha, p)
+        W = torch.linalg.inv(J_D + J_pi)
+        return W
+    
+    def div_W(params_flat):
+        JW = jacfwd(W_of_theta)(params_flat) #[p, p, p] full derivative tensor of W matrix 
+        #Jw[i, j, k] = dW_{ij} / d theta_k 
+        #Divergence wants terms where j = k -> torch.diag with last 2 dimensions does this 
+        # Select JW[i,j,j] and sum over j
+        d = torch.diagonal(
+            JW,
+            dim1=1,
+            dim2=2
+        ).sum(dim=-1)                              # [p]
+        return d
+    num_samples = all_thetas.shape[0]
+    dtype = all_thetas.dtype
+    device = all_thetas.device
+
+    sum_W = torch.zeros(
+        (p, p),
+        dtype=dtype,
+        device=device
+    )
+
+    sum_F = torch.zeros_like(sum_W)
+
+
+    for m, theta_sample in enumerate(all_thetas):
+
+        params_flat = (
+            theta_sample
+            .detach()
+            .clone()
+            .requires_grad_(True)
+        )
+        J_D, J_DP = JD_JDP_of_theta(params_flat)
+
+        W = W_of_theta(params_flat)
+        d = div_W(params_flat) 
+        g = beta_prior_score(params_flat, alpha)   # [p]
+        q = W @ g + d          # [p]
+        F_sample = (
+            W @ J_D @ W
+            + torch.outer(q, q)
+        )                               # [p,p]
+        if m % 100 == 0:
+            print(f"New bound theta {m+1}/{num_samples}")
+            with torch.no_grad():
+                print("||W||     =", torch.linalg.norm(W).item())
+                print("||div W|| =", torch.linalg.norm(d).item())
+                print("||F_m||   =", torch.linalg.norm(F_sample).item())
+            
+        with torch.no_grad():
+            # Accumulate WITHOUT retaining autograd graphs
+            sum_W += W.detach()
+            sum_F += F_sample.detach()
+        del J_D, J_DP, W, d, g, q, F_sample, params_flat
+
+    
+    E_W = sum_W / num_samples
+    F_AT = sum_F / num_samples
+
+
+    AT_BCRB = (
+        E_W @ torch.linalg.solve(F_AT, E_W)
+    )
+
+    atbcrb_diag_full = torch.diag(AT_BCRB)
+    atbcrb_dict = {}
+
+    for key in selected_keys:
+
+        key_tuple = key_to_tuple(
+            key,
+            network_params
+        )
+
+        if key_tuple in param_order_list:
+
+            idx = param_order_list.index(
+                key_tuple
+            )
+
+            atbcrb_dict[key] = (
+                atbcrb_diag_full[idx].item()
+            )
+
+        else:
+
+            print(
+                f"Warning: {key} ({key_tuple}) "
+                "not found in param_order_list"
+            )
+
+    return atbcrb_dict
+
+    
 def compute_ECRB(
     snr_db,
     selected_keys,
