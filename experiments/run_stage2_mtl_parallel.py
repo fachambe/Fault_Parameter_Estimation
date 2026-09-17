@@ -743,9 +743,9 @@ def calculate_mse_monte_carlo(var_f, selected_keys, snr_db, num_steps, scenario,
 
 def main():
     start_time = time.perf_counter()
-    #snr_dbs = [0, 10, 20, 30, 40, 50, 60]
+    snr_dbs = [0, 10, 20, 30, 40, 50, 60]
     #snr_dbs = [30, 40]
-    snr_dbs = [60]
+    #snr_dbs = [60]
     scenario = "with_fault"  # Stage 2 always uses fault scenario
     #mode = "frequentist"
     mode = "bayesian"
@@ -786,6 +786,7 @@ def main():
         torch.manual_seed(SEED-1)
         beta_dist = torch.distributions.Beta(ALPHA, ALPHA)
         theta_bayesian = beta_dist.sample((M, p_fault))
+        print(theta_bayesian.dtype)  
 
     # Get true params and compute clean transfer function (with fault)
     params_flat = get_true_param_flat()
@@ -843,9 +844,9 @@ def main():
         elif mode == "bayesian":
             # Bayesian: θ ~ π(θ) each run, BCRLB
 
-            bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
-                snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
-            )
+            # bayesian_mse_dict = calculate_bayesian_mse_monte_carlo(
+            #     snr_db, selected_keys, theta_bayesian, num_steps, scenario, p_fault
+            # )
             # bcrlb_dict = compute_real_BCRLB(
             #     snr_db, selected_keys, theta_bayesian, scenario, ALPHA, forward_model,
             #     network_params, wrapper_fn, get_true_param_flat, get_inferred_param_order,
@@ -855,10 +856,10 @@ def main():
             #                 snr_db, selected_keys, theta_bayesian, ALPHA,
             #                 network_params, wrapper_fn, get_inferred_param_order
             #             )
-            # at_bcrb_dict2 = compute_ATBCRB2(
-            #     snr_db, selected_keys, theta_bayesian, ALPHA,
-            #     network_params, wrapper_fn, get_inferred_param_order
-            # )
+            at_bcrb_dict2 = compute_ATBCRB2(
+                snr_db, selected_keys, theta_bayesian, ALPHA,
+                network_params, wrapper_fn, get_inferred_param_order
+            )
             
             # ecrb_dict = compute_ECRB(
             #     snr_db, selected_keys, theta_bayesian,
@@ -868,18 +869,18 @@ def main():
             #     snr_db, selected_keys, theta_bayesian, ALPHA,
             #     network_params, wrapper_fn, get_inferred_param_order
             # )
-            print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
+            #print(f"Bayesian RMSE (M={M}):", {k: f"{math.sqrt(v):.4f}" for k, v in bayesian_mse_dict.items()})
             #print(f"sqrt(AT-BCRLB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict.items()})
-            #print(f"sqrt(AT-BCRLB2):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict2.items()})
+            print(f"sqrt(AT-BCRLB2):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in at_bcrb_dict2.items()})
             #print(f"sqrt(BCRLB):", {k: f"{math.sqrt(v):.4f}" for k, v in bcrlb_dict.items()})
             #print(f"New Bound:", {k: f"{math.sqrt(v):.4f}" for k, v in newbound_dict.items()})
             #print(f"sqrt(ECRB):", {k: f"{math.sqrt(v) if v >= 0 else float('nan'):.4f}" for k, v in ecrb_dict.items()})
             # Store results
             for key in selected_keys:
                 #if key in newbound_dict:
-                rmse_results[key].append(math.sqrt(bayesian_mse_dict[key]))
+                #rmse_results[key].append(math.sqrt(bayesian_mse_dict[key]))
                     #crlb_results[key].append(math.sqrt(bcrlb_dict[key]))
-                    #atcrlb_results[key].append(math.sqrt(at_bcrb_dict2[key]))
+                atcrlb_results[key].append(math.sqrt(at_bcrb_dict2[key]))
                     #newbound_results[key].append(math.sqrt(newbound_dict[key]))
                     #ecrlb_results[key].append(math.sqrt(ecrb_dict[key]))
 

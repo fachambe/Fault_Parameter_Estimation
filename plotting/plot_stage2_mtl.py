@@ -385,8 +385,8 @@ def main():
     
 
     
-    #print("DONE")
-    #sys.exit()
+    print("DONE")
+    sys.exit()
     # Generate plots
     print("\nGenerating plots...")
 
