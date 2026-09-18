@@ -38,7 +38,7 @@ def complex_partials_fullbatch(fm, test, device):
     Returns:
       du_aug: [N, F, 5] complex,  columns = [∂u/∂ZF, ∂u/∂ZL, ∂u/∂ZF*, ∂u/∂ZL*, ∂u/∂L1]
     """
-    # use float32 to match compute_H_complex dtypes and keep JVPs alive
+    # [N]
     ZF_re = torch.tensor(test["ZF_true_re"], device=device, dtype=torch.float32)
     ZF_im = torch.tensor(test["ZF_true_im"], device=device, dtype=torch.float32)
     ZL_re = torch.tensor(test["ZL_true_re"], device=device, dtype=torch.float32)
@@ -71,15 +71,8 @@ def complex_partials_fullbatch(fm, test, device):
     du_dZL_c = 0.5 * (du_ZL_re + 1j * du_ZL_im)   # ∂u/∂ZL*
     du_dL1   = du_L1                              # ∂u/∂L1
 
-    # du_star_dZF   = 0.5 * (du_star_ZF_re - 1j * du_star_ZF_im)   # ∂u*/∂ZF
-    # du_star_dZF_c = 0.5 * (du_star_ZF_re + 1j * du_star_ZF_im)   # ∂u*/∂ZF*
-    # du_star_dZL   = 0.5 * (du_star_ZL_re - 1j * du_star_ZL_im)   # ∂u*/∂ZL
-    # du_star_dZL_c = 0.5 * (du_star_ZL_re + 1j * du_star_ZL_im)   # ∂u*/∂ZL*
-    # du_star_dL1   = du_star_L1                              # ∂u*/∂L1
-
     # Stack in augmented parameter order
     du_aug = torch.stack([du_dZF, du_dZL, du_dZF_c, du_dZL_c, du_dL1], dim=-1)  # [N,F,5]
-    # du_star_aug = torch.stack([du_star_dZF, du_star_dZL, du_star_dZF_c, du_star_dZL_c, du_star_dL1], dim=-1)  # [N,F,5]
     return du_aug 
 
 
@@ -128,15 +121,90 @@ def fim_from_complex_jac(du_aug, var_NF):
     I_nf = (f.conj() @ f.transpose(-1, -2)) + (i.conj() @ i.transpose(-1, -2))  # [N,F,5,5] tranpose(-1, -2) swaps last and second last dimensions 5x1 -> 1x5
     w = (1.0 / var_NF).unsqueeze(-1).unsqueeze(-1)                                # [N,F,1,1]
     I_n = (I_nf * w).sum(dim=1)                                                    # [N,5,5]   and sum over F dimension 
-    #print("VAR NF", var_NF)
-    # import numpy as np
-    # print("1/ZF I_n[:, 0,0]", np.sqrt((1/I_n[:, 0, 0]).mean().item()))
-    # print("ZF I_n[0,0,0]", I_n[0, 0, 0])
-    # print("ZL I_n[0,1,1]", I_n[0, 1, 1])
-    # print("ZF* I_n[0,2,2]", I_n[0, 2, 2])
-    # print("ZL* I_n[0,3,3]", I_n[0, 3, 3])
-    # print("L1 I_n[0,4,4]", I_n[0, 4, 4])
     return I_n
+
+@torch.no_grad()
+def get_CRLB_realway(fm, test, var_f, device):
+    """
+    Compute CRLB using real parameterization (5 real params: L1, ZF_re, ZF_im, ZL_re, ZL_im).
+
+    This is the standard frequentist CRLB approach treating all parameters as real,
+    which should give the same result as the complex CRLB when comparing corresponding parameters.
+
+    Args:
+        fm: Forward model with compute_H_complex method
+        test: Dict with true parameter values (each [N])
+        var_f: Noise variance - scalar or [F] tensor
+        device: torch device
+
+    Returns:
+        CRLB_L1: [N] CRLB (variance bound) for L1
+        CRLB_ZF: [N] CRLB (variance bound) for ZF (sum of ZF_re and ZF_im variances)
+        CRLB_ZL: [N] CRLB (variance bound) for ZL (sum of ZL_re and ZL_im variances)
+    """
+    # use float32 to match compute_H_complex dtypes and keep JVPs alive
+    ZF_re = torch.tensor(test["ZF_true_re"], device=device, dtype=torch.float32)
+    ZF_im = torch.tensor(test["ZF_true_im"], device=device, dtype=torch.float32)
+    ZL_re = torch.tensor(test["ZL_true_re"], device=device, dtype=torch.float32)
+    ZL_im = torch.tensor(test["ZL_true_im"], device=device, dtype=torch.float32)
+    L1    = torch.tensor(test["L1_true"],    device=device, dtype=torch.float32)
+
+    # Vectorize jacobian over N observations
+    # Each of the 5 outputs is [N, F, 2] where last dim = (∂Re H, ∂Im H) w.r.t. that parameter
+    dri_ZF_re, dri_ZF_im, dri_ZL_re, dri_ZL_im, dri_L1 = vmap(
+        jac_fwd_single, in_dims=(None, 0, 0, 0, 0, 0)
+    )(fm, ZF_re, ZF_im, ZL_re, ZL_im, L1)
+
+    # Stack jacobians: J[n] = [F, 2, 5] where 5 params = [L1, ZF_re, ZF_im, ZL_re, ZL_im]
+    # dri_* are [N, F, 2], we need to stack along last dimension and reorder
+    J = torch.stack([dri_L1, dri_ZF_re, dri_ZF_im, dri_ZL_re, dri_ZL_im], dim=-1)  # [N, F, 2, 5]
+
+    # Compute FIM for each sample using the real parameterization approach
+    # Delta = ∂H_re/∂θ + i*∂H_im/∂θ [N, F, 5]
+    Delta = J[:, :, 0, :] + 1j * J[:, :, 1, :]  # [N, F, 5]
+    # Delta_tilde = ∂H_re/∂θ - i*∂H_im/∂θ = conj(Delta) for real θ
+    Delta_tilde = J[:, :, 0, :] - 1j * J[:, :, 1, :]  # [N, F, 5]
+
+    # Expand for matrix multiply [N, F, 5, 1]
+    Delta = Delta.unsqueeze(-1)
+    Delta_tilde = Delta_tilde.unsqueeze(-1)
+
+    # FIM per frequency: I_f = Δ⊗Δ̃ᴴ + Δ̃⊗Δᴴ (this is real and symmetric)
+    I_f = (Delta @ Delta_tilde.transpose(-1, -2)) + \
+          (Delta_tilde @ Delta.transpose(-1, -2))  # [N, F, 5, 5]
+
+    # Sum over frequencies and normalize by noise variance
+    # Handle different var_f shapes: scalar, [F], or [N, F]
+    if isinstance(var_f, torch.Tensor):
+        if var_f.ndim == 0:
+            # Scalar tensor
+            var_f_expanded = var_f.view(1, 1, 1, 1)
+        elif var_f.ndim == 1:
+            # [F] - frequency-dependent noise
+            var_f_expanded = var_f.view(1, -1, 1, 1)  # [1, F, 1, 1]
+        elif var_f.ndim == 2:
+            # [N, F] - per-observation, per-frequency noise
+            var_f_expanded = var_f.unsqueeze(-1).unsqueeze(-1)  # [N, F, 1, 1]
+        else:
+            raise ValueError(f"var_f has unexpected shape: {var_f.shape}")
+    else:
+        # Python scalar
+        var_f_expanded = var_f
+
+    FIM = ((1.0 / var_f_expanded) * I_f).sum(dim=1).real  # [N, 5, 5]
+
+    # Compute CRLB = FIM^{-1}
+    CRLB_mat = torch.linalg.inv(FIM)  # [N, 5, 5]
+
+    # Extract individual CRLBs from diagonal
+    # Parameter order: [L1, ZF_re, ZF_im, ZL_re, ZL_im]
+    CRLB_L1 = CRLB_mat[:, 0, 0]  # [N]
+    # For complex parameters, CRLB = variance(real) + variance(imag)
+    CRLB_ZF = CRLB_mat[:, 1, 1] + CRLB_mat[:, 2, 2]  # [N]
+    CRLB_ZL = CRLB_mat[:, 3, 3] + CRLB_mat[:, 4, 4]  # [N]
+
+    return CRLB_L1, CRLB_ZF, CRLB_ZL
+
 
 @torch.no_grad()
 def get_CRLB(FIM_total):
@@ -196,53 +264,6 @@ def get_CRLB(FIM_total):
 
 
     return crlb_L1.real, crlb_ZF, crlb_ZL
-
-
-@torch.no_grad()
-def crlb_L1_only_batch(fm, test, var_NF, eps=1e-12):
-    """
-    Batched CRLB for L1 only, over all samples in `test`.
-
-    Inputs
-    ------
-    fm: ForwardModel
-    test: dict with keys
-        "ZF_true_re", "ZF_true_im", "ZL_true_re", "ZL_true_im", "L1_true"
-        Each is [N] float32 (as produced elsewhere in this file).
-    var_NF: [N, F] or [F] real tensor (noise variance per frequency, broadcastable)
-
-    Returns
-    -------
-    FI_L1:   [N] real tensor (Fisher Information per sample)
-    CRLB_L1: [N] real tensor
-    """
-    device = fm.gamma.device
-    ZF_re = torch.as_tensor(test["ZF_true_re"], device=device, dtype=torch.float32)
-    ZF_im = torch.as_tensor(test["ZF_true_im"], device=device, dtype=torch.float32)
-    ZL_re = torch.as_tensor(test["ZL_true_re"], device=device, dtype=torch.float32)
-    ZL_im = torch.as_tensor(test["ZL_true_im"], device=device, dtype=torch.float32)
-    L1    = torch.as_tensor(test["L1_true"],    device=device, dtype=torch.float32)
-
-    # Build ZF, ZL complex [N]
-    ZF = torch.complex(ZF_re, ZF_im).to(torch.cfloat)
-    ZL = torch.complex(ZL_re, ZL_im).to(torch.cfloat)
-
-    # We just need the derivative wrt L1: reuse jac_fwd_single via vmap
-    # Outputs: each arg Jacobian is [N, F, 2]; we only keep the L1 piece.
-    _, _, _, _, d_ri_L1 = vmap(jac_fwd_single, in_dims=(None, 0, 0, 0, 0, 0))(
-        fm, ZF_re, ZF_im, ZL_re, ZL_im, L1
-    )  # [N, F, 2] with last dim (dRe, dIm)
-
-    dRe = d_ri_L1[..., 0]   # [N, F]
-    dIm = d_ri_L1[..., 1]   # [N, F]
-
-    # Broadcast var_NF to [N, F]
-    if var_NF.ndim == 1:
-        var_NF = var_NF.unsqueeze(0).expand_as(dRe)
-    # FI per-sample
-    FI_L1 = torch.sum(2.0 * (dRe**2 + dIm**2) / var_NF, dim=-1)  # [N]
-    CRLB_L1 = 1.0 / FI_L1.clamp_min(eps)                         # [N]
-    return FI_L1, CRLB_L1
 
 
 def crlb_for_1_real_param(fm, target, fixed, var_f, device):

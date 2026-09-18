@@ -20,7 +20,7 @@ import scipy.io as sio
 
 from core.forward import ForwardModel
 from core.likelihoods import ComplexGaussianLik
-from core.crlb import complex_partials_fullbatch, fim_from_complex_jac, get_CRLB
+from core.crlb import complex_partials_fullbatch, fim_from_complex_jac, get_CRLB, get_CRLB_realway
 from estimators.mle_gradient import GradientMLE
 from data.manager import DatasetManager
 from config.simple_config_loader import fmt_freq
