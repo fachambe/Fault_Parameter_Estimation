@@ -81,22 +81,6 @@ def format_freq(f_hz):
 f_start_str = format_freq(frequencies[0].item())
 f_end_str = format_freq(frequencies[-1].item())
 freq_range_str = f"{f_start_str}-{f_end_str}"
-FILENAME_PREFIX = f"{f_start_str}-{f_end_str}_{OPTIMIZER}_lr{LR}"
-
-
-#Transmitter/Receiver Constants
-Z_RG = Z_R1 = Z_R2 = 50.0
-Z_R3 = 50.0
-ZT0 = ZTG1 = ZTG2 = 50.0
-ZTG3 = 50.0
-ZT12 = 100.0
-ZT13 = ZT23 = 100.0
-Z_rec = calculate_receiver_load(Z_RG, Z_R1, Z_R2, Z_R3).to(device)
-Y_rec = torch.linalg.inv(Z_rec)
-Z_rec = Z_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
-Y_rec = Y_rec.unsqueeze(0).repeat(num_freqs, 1, 1)
-
-BACKBONE_KEYS = ["l_w_0", "l_w_1", "l_w_4", "l_w_25", "l_w_28"]
 
 # ---- Global Network Parameter Dictionary ----
 network_params = {
