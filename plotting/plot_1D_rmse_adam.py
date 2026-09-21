@@ -10,17 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def find_adam_results(results_dir="results"):
-    """Find most recent Adam results file."""
-    results_path = pathlib.Path(results_dir)
-    if not results_path.exists():
-        return None
-
-    files = list(results_path.glob("1D_adam_*.npz"))
-    return max(files, key=lambda p: p.stat().st_mtime) if files else None
-
-
-def plot_rmse_vs_crlb(results_path, save_dir="figures/plot_rmse_adam"):
+def plot_rmse_vs_crlb(results_path):
     """
     Plot RMSE vs sqrt(CRLB) across SNR for all 5 parameters.
 
@@ -29,6 +19,7 @@ def plot_rmse_vs_crlb(results_path, save_dir="figures/plot_rmse_adam"):
     - Row 2: ZL_re, ZL_im
     - Row 3: L1 (centered)
     """
+    save_dir= "figures/plot_rmse_adam"
     save_path = pathlib.Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
@@ -105,25 +96,20 @@ def plot_rmse_vs_crlb(results_path, save_dir="figures/plot_rmse_adam"):
     print(f"Saved RMSE vs CRLB plot to {save_path / 'rmse_vs_crlb_adam.pdf'}")
 
 
-def main(results_path=None, save_dir="figures/plot_rmse_adam"):
+def main(results_path):
     """Main function."""
     if results_path is None:
-        results_path = find_adam_results()
-
-    if results_path is None:
-        print("Error: No Adam results found. Run run_1D_adam.py first.")
+        print("Error: No result file specified. Run run_1D_adam.py first.")
         return
 
     print(f"Loading results from {results_path}")
-    plot_rmse_vs_crlb(results_path, save_dir)
+    plot_rmse_vs_crlb(results_path)
     print("Done!")
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot RMSE vs CRLB for Adam")
-    parser.add_argument("--results", type=str, default=None, help="Path to results file")
-    parser.add_argument("--save-dir", type=str, default="figures/plot_rmse_adam", help="Save directory")
+    parser.add_argument("results_file", type=str, help="Path to results npz file")
     args = parser.parse_args()
-
-    main(results_path=args.results, save_dir=args.save_dir)
+    main(results_path=args.results)

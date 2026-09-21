@@ -4,7 +4,6 @@ from .base import Estimator, u_to_theta_sigmoid, u_to_theta_tanh
 from estimators.bfgs import BFGSEstimator
 from estimators.LM import LMEstimator
 from estimators.Newton import NewtonEstimator
-from torch.func import hessian, vmap
 
 torch.set_float32_matmul_precision("high")
 
