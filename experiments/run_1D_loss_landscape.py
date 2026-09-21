@@ -13,7 +13,7 @@ import torch
 import hashlib
 import json
 from core.forward import ForwardModel
-from data.manager import DatasetManager
+from core.manager import DatasetManager
 
 # Network parameters (true values used to generate observations)
 network_params = {

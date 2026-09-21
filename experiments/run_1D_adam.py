@@ -15,8 +15,8 @@ import json
 from core.forward import ForwardModel
 from core.likelihoods import ComplexGaussianLik
 from core.crlb import crlb_for_1_real_param
+from core.manager import DatasetManager
 from estimators.mle_gradient import GradientMLE
-from data.manager import DatasetManager
 
 # Network parameters (true values used to generate observations)
 network_params = {

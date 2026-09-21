@@ -21,8 +21,8 @@ import scipy.io as sio
 from core.forward import ForwardModel
 from core.likelihoods import ComplexGaussianLik
 from core.crlb import complex_partials_fullbatch, fim_from_complex_jac, get_CRLB, get_CRLB_realway
+from core.manager import DatasetManager
 from estimators.mle_gradient import GradientMLE
-from data.manager import DatasetManager
 
 
 def fmt_freq(hz):
