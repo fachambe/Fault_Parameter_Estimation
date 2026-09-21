@@ -4,7 +4,7 @@ import numpy as np
 from estimators.base import Estimator
 
 class GridSearchMLE(Estimator):
-    def __init__(self, fm, likelihood, grid, target, fixed, device, batch_size=1000):
+    def __init__(self, fm, likelihood, grid, network_params, device, batch_size=1000):
         """
         Grid search MLE estimator with batching for memory efficiency.
 
@@ -12,12 +12,16 @@ class GridSearchMLE(Estimator):
             fm: Forward model
             likelihood: Likelihood function
             grid: [K] float candidates for the target parameter
-            target: Parameter to estimate ("L1", "ZF_re", etc.)
-            fixed: Dict with fixed parameter values
+            network_params: Dict with all parameter configs (extracts target from inferred flag)
             device: torch device
-            batch_size: Number of observations to process at once (default 500)
+            batch_size: Number of observations to process at once (default 1000)
         """
-        super().__init__(fm, likelihood, target, fixed, device=device)
+        super().__init__(fm, likelihood, network_params, device=device)
+
+        # Verify exactly one parameter is inferred for 1D grid search
+        if len(self.targets) != 1:
+            raise ValueError(f"1D grid search requires exactly 1 inferred parameter, got {len(self.targets)}")
+
         self.grid = grid
         self.batch_size = batch_size
 

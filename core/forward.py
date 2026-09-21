@@ -3,18 +3,118 @@ import numpy as np
 """
 2-conductor Transmission Line (TL) Model
 """
+
+def calculate_gamma_zc(frequencies, device=None):
+    """
+    Calculate propagation constant (gamma) and characteristic impedance (Zc)
+    for a 2-conductor transmission line from physical cable parameters.
+
+    Parameters:
+    -----------
+    frequencies : torch.Tensor or np.ndarray
+        Frequencies in Hz, shape [F]
+    device : torch.device, optional
+        Device for torch tensor output
+
+    Returns:
+    --------
+    gamma : torch.Tensor [F], cfloat
+        Propagation constant
+    Zc : torch.Tensor [F], cfloat
+        Characteristic impedance
+    """
+    # Convert to numpy if torch tensor
+    if isinstance(frequencies, torch.Tensor):
+        frequencies = frequencies.cpu().numpy()
+
+    frequencies = np.asarray(frequencies)
+    omega = 2 * np.pi * frequencies
+
+    # Physical constants
+    MU0 = 4 * np.pi * 1e-7
+    EPS0 = 8.854187817620e-12
+
+    # XLPE cable constants 
+    COND_RAD = 0.0039894 #3.9mm
+    D = 0.015 #15mm 
+    SIGMA = 5.69e7
+
+    STRAND_RAD = 0.000915
+    NUM_OUTER_STRANDS = 12  # Number of strands on outer ring of conductor
+
+    EPS_R_XLPE = 2.3 - 1j * 0.001
+
+
+    delta = 1.0 / np.sqrt(np.pi * frequencies * MU0 * SIGMA)
+
+    r_solid = np.where(
+        delta > 2 * COND_RAD,
+        1.0 / (SIGMA * np.pi * COND_RAD**2),
+        (1.0 / (2 * COND_RAD))
+        * np.sqrt(MU0 * frequencies / (np.pi * SIGMA)),
+    )
+
+    x_c = (
+        NUM_OUTER_STRANDS
+        * (
+            np.arccos((STRAND_RAD - delta) / STRAND_RAD)
+            * STRAND_RAD**2
+            - (STRAND_RAD - delta)
+            * np.sqrt(
+                STRAND_RAD**2
+                - (STRAND_RAD - delta)**2
+            )
+        )
+        / (2 * COND_RAD * delta * np.pi)
+    )
+
+    r_stranded = r_solid / x_c
+    R = 2 * r_stranded
+
+    L = (
+        MU0
+        / np.pi
+        * np.log(D / COND_RAD)
+    )
+    C_complex = (
+        MU0
+        * EPS0
+        * EPS_R_XLPE
+        / L
+    )
+
+    C = np.real(C_complex)
+
+    G = -np.imag(C_complex) * omega
+
+    Z = R + 1j * omega * L
+    Y = G + 1j * omega * C
+
+    Z_c = np.sqrt(Z / Y)
+    gamma = np.sqrt(Z * Y)
+
+    # Convert to torch tensors
+    if device is None:
+        device = torch.device('cpu')
+
+    gamma_torch = torch.tensor(gamma, dtype=torch.cfloat, device=device)
+    Zc_torch = torch.tensor(Z_c, dtype=torch.cfloat, device=device)
+
+    return gamma_torch, Zc_torch
+
+
 class ForwardModel:
-    def __init__(self, gamma, Zc, L, Zs, device=None):
+    def __init__(self, frequencies, L, Zs, device=None):
+        self.device = device
+        gamma, Zc = calculate_gamma_zc(frequencies, device)
         self.gamma = gamma
         self.Zc = Zc
         self.Zs = Zs
         self.L = L
-        self.device = device
-
 
     def compute_H_complex(self, L1, ZF, ZL):
         """
-        Compute transfer function of the simple forward model for batched inputs. 
+        Compute transfer function of the simple forward model for batched inputs.
         Accepts:
         L1: [..., N] float32
         ZF: [..., N] cfloat
@@ -64,7 +164,7 @@ class ForwardModel:
         B1 = Zc * torch.sinh(tmp1) + tmp5 * torch.sinh(tmp2) * torch.sinh(tmp3) # [N,F]
         C1 = torch.sinh(tmp1)/Zc + torch.cosh(tmp2)*torch.cosh(tmp3)/ZF_nf
         D1 = torch.cosh(tmp1) + tmp4*torch.sinh(tmp3)*torch.cosh(tmp2)
-        
+
         H = ZL_nf / (A1 * ZL_nf + B1)
         #H = ZL_nf / (A1 * ZL_nf + B1 + C1*ZL_nf*self.Zs + D1*self.Zs)   # [N,F] cfloat
 
@@ -73,4 +173,3 @@ class ForwardModel:
             return H.reshape(*batch, N, F)
         else:
             return H
-

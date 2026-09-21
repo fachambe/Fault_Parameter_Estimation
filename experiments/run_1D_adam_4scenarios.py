@@ -23,7 +23,13 @@ from core.likelihoods import ComplexGaussianLik
 from core.crlb import crlb_for_1_real_param
 from estimators.mle_gradient import GradientMLE
 from data.manager import DatasetManager
-from config.simple_config_loader import fmt_freq
+
+
+def fmt_freq(hz):
+    """Format frequency for display/filenames."""
+    if hz >= 1e6:
+        return f"{hz/1e6:.1f}MHz".replace(".0MHz", "MHz")
+    return f"{hz/1e3:.0f}kHz"
 
 # =============================================================================
 # EXPERIMENT CONFIGURATION (self-contained, no yaml dependency)

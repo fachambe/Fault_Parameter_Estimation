@@ -13,31 +13,13 @@ class GradientMLE(Estimator):
     """
     Gradient-based MLE for theta = [L1, ReZF, ImZF, ReZL, ImZL].
     Supports Adam, SGD, or other PyTorch optimizers + optional BFGS/LM refinement.
-
-    Parameterization:
-      L1    in [0, L]             via sigmoid
-      ReZF  in [1, 4000]          via sigmoid
-      ImZF  in [-100, +100]       via tanh
-      ReZL  in [1, 400]           via sigmoid
-      ImZL  in [-100, +100]       via tanh
-
-    Args
-    ----
-    fm: ForwardModel (provides compute_H_complex(L1, ZF, ZL) and L)
-    likelihood: e.g., ComplexGaussianLik()
-    target: "L1" | "ZF_re" | "ZF_im" | "ZL_re" | "ZL_im"
-    fixed: dict of fixed params, e.g. {"ZF": {"re": 100, "im": -5}, "ZL": {...}, "L1": 500.0}
-    true_range: parameter ranges from config
-    device: default: "cuda"
     """
     def __init__(self,
                  fm,
                  likelihood,
-                 target,
-                 fixed,
-                 true_range,
-                 mode,
+                 network_params,
                  device="cuda",
+                 mode="1d",
                  adam_steps: int = 20000,
                  adam_lr: float = 1e-2,
                  use_bfgs: bool = False,
@@ -47,7 +29,10 @@ class GradientMLE(Estimator):
                  use_Newton: bool = False,
                  verbose: bool = True
                  ):
-        super().__init__(fm, likelihood, target, fixed, true_range, mode, device)
+        super().__init__(fm, likelihood, network_params, device)
+
+        # Mode: "1d" for single parameter, "joint" for multi-parameter
+        self.mode = mode
 
         # Adam hyperparameters
         self.adam_steps = int(adam_steps)

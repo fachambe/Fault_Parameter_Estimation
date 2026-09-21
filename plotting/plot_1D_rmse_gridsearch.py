@@ -9,6 +9,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Save directory for plots
+SAVE_DIR = "figures/plot_rmse_gridsearch"
+
 
 def find_gridsearch_results(results_dir="results"):
     """Find most recent grid search results file."""
@@ -20,7 +23,7 @@ def find_gridsearch_results(results_dir="results"):
     return max(files, key=lambda p: p.stat().st_mtime) if files else None
 
 
-def plot_rmse_vs_crlb(results_path, save_dir="figures/plot_rmse_gridsearch"):
+def plot_rmse_vs_crlb(results_path):
     """
     Plot RMSE vs sqrt(CRLB) across SNR for all 5 parameters.
 
@@ -29,7 +32,7 @@ def plot_rmse_vs_crlb(results_path, save_dir="figures/plot_rmse_gridsearch"):
     - Row 2: ZL_re, ZL_im
     - Row 3: L1 (centered)
     """
-    save_path = pathlib.Path(save_dir)
+    save_path = pathlib.Path(SAVE_DIR)
     save_path.mkdir(parents=True, exist_ok=True)
 
     # Load results
@@ -124,25 +127,21 @@ def plot_rmse_vs_crlb(results_path, save_dir="figures/plot_rmse_gridsearch"):
     print(f"Saved RMSE vs CRLB plot to {save_path / 'rmse_vs_crlb_gridsearch.pdf'}")
 
 
-def main(results_path=None, save_dir="figures/plot_rmse_gridsearch"):
+def main(results_path):
     """Main function."""
     if results_path is None:
-        results_path = find_gridsearch_results()
-
-    if results_path is None:
-        print("Error: No grid search results found. Run run_1D_gridsearch.py first.")
+        print("Error: No results file specified. Run run_1D_gridsearch.py first.")
         return
 
     print(f"Loading results from {results_path}")
-    plot_rmse_vs_crlb(results_path, save_dir)
+    plot_rmse_vs_crlb(results_path)
     print("Done!")
 
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Plot RMSE vs CRLB for grid search")
-    parser.add_argument("--results", type=str, default=None, help="Path to results file")
-    parser.add_argument("--save-dir", type=str, default="figures/plot_rmse_gridsearch", help="Save directory")
+    parser.add_argument("results_file", type=str, help="Path to results npz file")
     args = parser.parse_args()
 
-    main(results_path=args.results, save_dir=args.save_dir)
+    main(results_path=args.results_file)

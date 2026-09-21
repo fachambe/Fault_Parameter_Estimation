@@ -36,32 +36,58 @@ class Estimator:
     For multi-parameter estimators:
       - Returns dict of numpy arrays of shape [N] for each parameter
     """
-    def __init__(self, fm, likelihood, target, fixed, true_range=None, mode=None, device="cuda"):
+    def __init__(self, fm, likelihood, network_params, device="cuda"):
+        """
+        Args:
+            fm: Forward model instance
+            likelihood: Likelihood function
+            network_params: Dict with all parameter configs. Each param has: value, inferred, range
+                   Example: {"L1": {"value": 250, "inferred": True, "range": (1, 999)}, ...}
+            device: torch device
+        """
         self.fm = fm
         self.lik = likelihood
-        self.target = target
         self.device = device
-        self.mode = mode
-        self.fixed = fixed
-        self.true_range = true_range
+        self.network_params = network_params
 
-        # Parse fixed params: convert dict to complex if needed
-        fx = {k: (complex(fixed[k]["re"], fixed[k]["im"]) if isinstance(fixed[k], dict) else fixed[k])
-              for k in fixed}
-        self.L1_fix = torch.as_tensor(fx["L1"], device=self.device, dtype=torch.float32) #scalar
-        self.ZF_fix = torch.as_tensor(fx["ZF"], device=self.device, dtype=torch.cfloat)
-        self.ZL_fix = torch.as_tensor(fx["ZL"], device=self.device, dtype=torch.cfloat)
+        # Extract target parameter(s) from inferred flags
+        self.targets = [k for k, v in network_params.items() if v["inferred"]]
 
-        # Parameter ranges from config (optional - not needed for grid search)
-        if true_range is not None:
-            self.L1_lo = float(true_range["L1"]["min"])
-            self.L1_hi = float(true_range["L1"]["max"])
-            self.ReZF_lo = float(true_range["ZF"]["re"]["min"])
-            self.ReZF_hi = float(true_range["ZF"]["re"]["max"])
-            self.ImZF_max = float(true_range["ZF"]["im"]["max"])  # symmetric: [-max, +max]
-            self.ReZL_lo = float(true_range["ZL"]["re"]["min"])
-            self.ReZL_hi = float(true_range["ZL"]["re"]["max"])
-            self.ImZL_max = float(true_range["ZL"]["im"]["max"])  # symmetric: [-max, +max]
+        # For 1D estimators, ensure exactly one target
+        if len(self.targets) == 1:
+            self.target = self.targets[0]
+        elif len(self.targets) == 0:
+            raise ValueError("At least one parameter must have 'inferred': True")
+        # Multi-parameter estimators can have multiple targets
+
+        # Extract all parameter values (used as fixed values for non-target params)
+        self.L1_val = network_params["L1"]["value"]
+        self.ZF_re_val = network_params["ZF_re"]["value"]
+        self.ZF_im_val = network_params["ZF_im"]["value"]
+        self.ZL_re_val = network_params["ZL_re"]["value"]
+        self.ZL_im_val = network_params["ZL_im"]["value"]
+
+        # Store as torch tensors for forward model
+        self.L1_fix = torch.as_tensor(self.L1_val, device=self.device, dtype=torch.float32)
+        self.ZF_fix = torch.complex(
+            torch.as_tensor(self.ZF_re_val, device=self.device, dtype=torch.float32),
+            torch.as_tensor(self.ZF_im_val, device=self.device, dtype=torch.float32)
+        )
+        self.ZL_fix = torch.complex(
+            torch.as_tensor(self.ZL_re_val, device=self.device, dtype=torch.float32),
+            torch.as_tensor(self.ZL_im_val, device=self.device, dtype=torch.float32)
+        )
+
+        # Parameter ranges (for gradient-based estimators)
+        self.L1_lo, self.L1_hi = network_params["L1"]["range"]
+        self.ReZF_lo, self.ReZF_hi = network_params["ZF_re"]["range"]
+        self.ImZF_lo, self.ImZF_hi = network_params["ZF_im"]["range"]
+        self.ReZL_lo, self.ReZL_hi = network_params["ZL_re"]["range"]
+        self.ImZL_lo, self.ImZL_hi = network_params["ZL_im"]["range"]
+
+        # For tanh transforms (imaginary parts), store max absolute value
+        self.ImZF_max = max(abs(self.ImZF_lo), abs(self.ImZF_hi))
+        self.ImZL_max = max(abs(self.ImZL_lo), abs(self.ImZL_hi))
 
     def _u_to_theta(self, u):
         """

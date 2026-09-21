@@ -275,8 +275,8 @@ def crlb_for_1_real_param(fm, target, fixed, var_f, device):
     Args:
         fm: Forward model with compute_H_complex method
         target: "L1" | "ZF_re" | "ZF_im" | "ZL_re" | "ZL_im"
-        fixed: Dict with true parameter values to evaluate at, e.g.:
-               {"L1": 250.0, "ZF": {"re": 100.0, "im": -50.0}, "ZL": {"re": 100.0, "im": -5.0}}
+        fixed: Dict with true parameter values to evaluate at (real parameter format), e.g.:
+               {"L1": 250.0, "ZF_re": 100.0, "ZF_im": -50.0, "ZL_re": 100.0, "ZL_im": -5.0}
         var_f: Noise variance - scalar or [F] tensor
         device: torch device
 
@@ -284,12 +284,12 @@ def crlb_for_1_real_param(fm, target, fixed, var_f, device):
         FI: scalar tensor - Fisher Information
         CRLB: scalar tensor - Cramer-Rao Lower Bound
     """
-    # Get fixed values as tensors
+    # Get fixed values as tensors (expect real parameter format)
     L1_fixed = torch.tensor(fixed["L1"], device=device, dtype=torch.float32)
-    ZF_re_fixed = torch.tensor(fixed["ZF"]["re"], device=device, dtype=torch.float32)
-    ZF_im_fixed = torch.tensor(fixed["ZF"]["im"], device=device, dtype=torch.float32)
-    ZL_re_fixed = torch.tensor(fixed["ZL"]["re"], device=device, dtype=torch.float32)
-    ZL_im_fixed = torch.tensor(fixed["ZL"]["im"], device=device, dtype=torch.float32)
+    ZF_re_fixed = torch.tensor(fixed["ZF_re"], device=device, dtype=torch.float32)
+    ZF_im_fixed = torch.tensor(fixed["ZF_im"], device=device, dtype=torch.float32)
+    ZL_re_fixed = torch.tensor(fixed["ZL_re"], device=device, dtype=torch.float32)
+    ZL_im_fixed = torch.tensor(fixed["ZL_im"], device=device, dtype=torch.float32)
 
     # Create wrapper that takes single real param and returns H as [F, 2] real
     if target == "L1":
