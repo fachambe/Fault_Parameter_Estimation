@@ -947,13 +947,13 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
         device=device
     )
     sum_F = torch.zeros_like(sum_W)
-    sum_F_data = torch.zeros_like(sum_W)
-    sum_F_prior = torch.zeros_like(sum_W)
-    sum_F_cross = torch.zeros_like(sum_W)
-    sum_F_div = torch.zeros_like(sum_W)
+    # sum_F_data = torch.zeros_like(sum_W)
+    # sum_F_prior = torch.zeros_like(sum_W)
+    # sum_F_cross = torch.zeros_like(sum_W)
+    # sum_F_div = torch.zeros_like(sum_W)
 
     for m, theta_sample in enumerate(all_thetas):
-        if m % 25 == 0:
+        if m % 250 == 0:
             print(f"AT-BCRB2 theta {m+1}/{num_samples}")
 
         params_flat = (
@@ -964,18 +964,18 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
         )
         J_D, J_DP = JD_JDP_of_theta(params_flat)
 
-        L_P = beta_prior_Lp(params_flat, alpha)
-        with torch.no_grad():
-            JD_sym = 0.5 * (J_D + J_D.T)
-            LP_sym = 0.5 * (L_P + L_P.T)
-            JDP_sym = 0.5 * (J_DP + J_DP.T)
+        # L_P = beta_prior_Lp(params_flat, alpha)
+        # with torch.no_grad():
+        #     JD_sym = 0.5 * (J_D + J_D.T)
+        #     LP_sym = 0.5 * (L_P + L_P.T)
+        #     JDP_sym = 0.5 * (J_DP + J_DP.T)
 
-            eig_JD = torch.linalg.eigvalsh(JD_sym)
-            eig_LP = torch.linalg.eigvalsh(LP_sym)
-            eig_JDP = torch.linalg.eigvalsh(JDP_sym)
+        #     eig_JD = torch.linalg.eigvalsh(JD_sym)
+        #     eig_LP = torch.linalg.eigvalsh(LP_sym)
+        #     eig_JDP = torch.linalg.eigvalsh(JDP_sym)
 
-            cond_JD = torch.linalg.cond(JD_sym)
-            cond_JDP = torch.linalg.cond(JDP_sym)
+        #     cond_JD = torch.linalg.cond(JD_sym)
+        #     cond_JDP = torch.linalg.cond(JDP_sym)
 
             # print(f"\n--- sample {m} ---")
             # print("theta =", params_flat.detach().cpu().numpy())
@@ -990,68 +990,68 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
         g = beta_prior_score(params_flat, alpha)   # [p]
         q = W @ g + d          # [p]
 
-        Wg = W @ g
+        #Wg = W @ g
 
-        F_data_sample = W @ J_D @ W
-        F_prior_sample = torch.outer(Wg, Wg)
-        F_cross_sample = (
-            torch.outer(Wg, d)
-            + torch.outer(d, Wg)
-        )
-        F_div_sample = torch.outer(d, d)
+        # F_data_sample = W @ J_D @ W
+        # F_prior_sample = torch.outer(Wg, Wg)
+        # F_cross_sample = (
+        #     torch.outer(Wg, d)
+        #     + torch.outer(d, Wg)
+        # )
+        # F_div_sample = torch.outer(d, d)
 
-        F_q_sample = (
-            F_prior_sample
-            + F_cross_sample
-            + F_div_sample
-        )
-        F_sample = F_data_sample + F_q_sample
+        # F_q_sample = (
+        #     F_prior_sample
+        #     + F_cross_sample
+        #     + F_div_sample
+        # )
+        # F_sample = F_data_sample + F_q_sample
 
-        # F_sample = (
-        #     W @ J_D @ W
-        #     + torch.outer(q, q)
-        # )                               # [p,p]
+        F_sample = (
+            W @ J_D @ W
+            + torch.outer(q, q)
+        )                               # [p,p]
 
-        with torch.no_grad():
-            # Accumulate WITHOUT retaining autograd graphs
-            sum_W += W.detach()
-            sum_F_data += F_data_sample.detach()
-            sum_F_prior += F_prior_sample.detach()
-            sum_F_cross += F_cross_sample.detach()
-            sum_F_div += F_div_sample.detach()
+        # with torch.no_grad():
+        #     # Accumulate WITHOUT retaining autograd graphs
+        #     sum_W += W.detach()
+        #     sum_F_data += F_data_sample.detach()
+        #     sum_F_prior += F_prior_sample.detach()
+        #     sum_F_cross += F_cross_sample.detach()
+        #     sum_F_div += F_div_sample.detach()
 
             # sum_F += F_sample.detach()
         del J_D, J_DP, W, d, g, q, F_sample, params_flat
 
     
     E_W = sum_W / num_samples
-    E_F_data = sum_F_data / num_samples
-    E_F_prior = sum_F_prior / num_samples
-    E_F_cross = sum_F_cross / num_samples
-    E_F_div = sum_F_div / num_samples
+    # E_F_data = sum_F_data / num_samples
+    # E_F_prior = sum_F_prior / num_samples
+    # E_F_cross = sum_F_cross / num_samples
+    # E_F_div = sum_F_div / num_samples
 
-    E_F_q = E_F_prior + E_F_cross + E_F_div
+    # E_F_q = E_F_prior + E_F_cross + E_F_div
 
-    F_AT = E_F_data + E_F_q
+    # F_AT = E_F_data + E_F_q
 
     
 
-    #F_AT = sum_F / num_samples
+    F_AT = sum_F / num_samples
 
 
     AT_BCRB = (
         E_W @ torch.linalg.solve(F_AT, E_W)
     )
-    print(f"\n===== AT-BCRB SNR = {snr_db} dB =====")
-    print("||E[W]||            =", torch.linalg.norm(E_W).item())
-    print("||E[W J_D W]||      =", torch.linalg.norm(E_F_data).item())
-    print("||E[(Wg)(Wg)^T]||   =", torch.linalg.norm(E_F_prior).item())
-    print("||E[cross]||         =", torch.linalg.norm(E_F_cross).item())
-    print("||E[divW divW^T]||   =", torch.linalg.norm(E_F_div).item())
-    print("||E[q q^T]||         =", torch.linalg.norm(E_F_q).item())
-    print("||F||                =", torch.linalg.norm(F_AT).item())
-    print("||F^-1||             =", torch.linalg.norm(torch.linalg.inv(F_AT)).item())
-    print("||AT-BCRB||           =", torch.linalg.norm(AT_BCRB).item())
+    # print(f"\n===== AT-BCRB SNR = {snr_db} dB =====")
+    # print("||E[W]||            =", torch.linalg.norm(E_W).item())
+    # print("||E[W J_D W]||      =", torch.linalg.norm(E_F_data).item())
+    # print("||E[(Wg)(Wg)^T]||   =", torch.linalg.norm(E_F_prior).item())
+    # print("||E[cross]||         =", torch.linalg.norm(E_F_cross).item())
+    # print("||E[divW divW^T]||   =", torch.linalg.norm(E_F_div).item())
+    # print("||E[q q^T]||         =", torch.linalg.norm(E_F_q).item())
+    # print("||F||                =", torch.linalg.norm(F_AT).item())
+    # print("||F^-1||             =", torch.linalg.norm(torch.linalg.inv(F_AT)).item())
+    # print("||AT-BCRB||           =", torch.linalg.norm(AT_BCRB).item())
 
     atbcrb_diag_full = torch.diag(AT_BCRB)
     atbcrb_dict = {}

@@ -31,7 +31,7 @@ LR = 0.03 #Learning rate for optimizer
 NUM_PARTICLES = 12  # Number of particles for SVI
 VECTORIZE_PARTICLES = True # Whether to vectorize particles (faster but uses more memory)
 SEED = 98 #Seed for theta_true for Bayesian Results
-M = 100 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
+M = 5000 #Number of Monte Carlo trials per SNR to calculate RMSE (number of SVI runs)
 M2 = 100 #Number of Monte Carlo samples for expectation of FIM and expectation of prior
 ALPHA = 3.0 #Hyperparameter of beta prior
 N_JOBS = -1  # Number of parallel jobs (-1 = use all cores)
@@ -893,7 +893,7 @@ def main():
                 results_to_save[f"{snr_prefix}_{param_name}"] = np.array(param_val)
 
 
-    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_60dbONLY_LR0037.npz")
+    save_path = os.path.join(OUTPUT_DIR, f"stage2_results_{freq_range_str}_M{M}_alpha{ALPHA}_{mode}_ATBCRB_M=5000.npz")
     np.savez(
         save_path,
         snr_dbs=np.array(snr_dbs),
