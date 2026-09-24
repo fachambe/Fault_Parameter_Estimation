@@ -106,6 +106,12 @@ def calculate_cable_parameters(r_w, omega, n, device=None):
     if device is None:
         device = omega.device
 
+    complex_dtype = (
+        torch.complex128
+        if omega.dtype == torch.float64
+        else torch.complex64
+    )
+    
     f = omega / (2 * torch.pi)  # Convert omega to frequency (Hz)
     num_freqs = len(f)
 
@@ -128,14 +134,14 @@ def calculate_cable_parameters(r_w, omega, n, device=None):
         torch.stack([2 * r, r, r], dim=-1),
         torch.stack([r, 2 * r, r], dim=-1),
         torch.stack([r, r, 2 * r], dim=-1)
-    ], dim=-2).to(torch.complex64)
+    ], dim=-2).to(complex_dtype)
 
     # L matrix
     L = (mu_0 / (2 * np.pi)) * torch.tensor([
         [2*np.log(dc / r_w), np.log((dc * dc2) / (dc * r_w)), np.log((dc * dc) / (dc2 * r_w))],
         [np.log((dc * dc2) / (dc * r_w)), 2*np.log(dc2 / r_w), np.log((dc2 * dc) / (dc * r_w))],
         [np.log((dc * dc) / (dc2 * r_w)), np.log((dc2 * dc) / (dc * r_w)), 2*np.log(dc / r_w)]
-    ], dtype=torch.complex64, device=device)
+    ], dtype=complex_dtype, device=device)
 
     L_new = L.unsqueeze(0).expand(num_freqs, -1, -1)
     C = mu_0 * epsilon * torch.linalg.inv(L)
@@ -145,7 +151,7 @@ def calculate_cable_parameters(r_w, omega, n, device=None):
         omega.reshape(-1, 1, 1)
         * tan_delta
         * C_new
-    ).to(torch.complex64)
+    ).to(complex_dtype)
 
     return R, L_new, C_new, G_new
 
@@ -183,7 +189,7 @@ def get_mtl_matrices(R, L, C, G, n, omega):
     eigvals, eigvecs = torch.linalg.eig(YZ)  # eigvals: (F, n), eigvecs: (F, n, n)
 
     # Compute gamma as a diagonal matrix with sqrt(eigenvalues)
-    gamma = torch.zeros((F, n, n), dtype=torch.complex64, device=R.device)
+    gamma = torch.zeros((F, n, n), dtype=R.dtype, device=R.device)
     gamma[:, torch.arange(n), torch.arange(n)] = torch.sqrt(eigvals)
 
     # Compute batch-wise inverses
@@ -259,10 +265,9 @@ def h_B(rhoL, ZC, T, T_inv, Gamma, length):
         h_B: Transfer function. Shape: (P, F, n, n)
     """
     n = ZC.shape[-1]
-    device = ZC.device
 
     # Identity matrix
-    U = torch.eye(n, dtype=torch.complex64, device=device)
+    U = torch.eye(n, dtype=ZC.dtype, device=ZC.device)
 
     # Reshape length for broadcasting
     if isinstance(length, torch.Tensor) and length.dim() > 0:

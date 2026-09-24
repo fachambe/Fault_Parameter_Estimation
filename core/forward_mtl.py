@@ -46,7 +46,7 @@ class MTLForwardModel:
     # Backbone cable keys (cables on the main signal path)
     BACKBONE_KEYS = ["l_w_0", "l_w_1", "l_w_4", "l_w_25", "l_w_28"]
 
-    def __init__(self, frequencies, network_params, device=None):
+    def __init__(self, frequencies, network_params, device=None, dtype=torch.float32):
         """
         Initialize the MTL forward model.
 
@@ -60,7 +60,16 @@ class MTLForwardModel:
             device: Torch device (defaults to CPU)
         """
         self.device = device or torch.device("cpu")
-        self.frequencies = frequencies.to(self.device)
+        self.dtype = dtype
+        self.complex_dtype = (
+        torch.complex128
+        if dtype == torch.float64
+        else torch.complex64
+    )
+        self.frequencies = frequencies.to(
+            device=self.device,
+            dtype=self.dtype
+        )
         self.omega = 2 * torch.pi * self.frequencies
         self.num_freqs = len(self.omega)
         self.num_conductors = 4  # 3-phase + neutral
@@ -101,7 +110,7 @@ class MTLForwardModel:
             [Z_RG + Z_R1, Z_RG, Z_RG],
             [Z_RG, Z_RG + Z_R2, Z_RG],
             [Z_RG, Z_RG, Z_RG + Z_R3]
-        ], dtype=torch.complex64, device=self.device)
+        ], dtype=self.complex_dtype, device=self.device)
 
         Y_rec = torch.linalg.inv(Z_rec)
         # Expand to [F, 3, 3] for frequency dimension
@@ -288,7 +297,11 @@ class MTLForwardModel:
 
     def get_total_backbone_length(self, cable_lengths):
         """Calculate total backbone length from cable_lengths dict."""
-        total = torch.tensor(0.0, device=self.device)
+        total = torch.tensor(
+            0.0,
+            dtype=self.dtype,
+            device=self.device
+        )
         for key in self.BACKBONE_KEYS:
             val = cable_lengths[key]
             total = total + val

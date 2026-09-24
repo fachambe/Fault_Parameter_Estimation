@@ -271,7 +271,7 @@ def set_only_fault_params_inferred():
 # ---- Forward Model Instance ----
 # Created after network_params is defined. Since network_params is passed by reference,
 # any updates (e.g., from generate_load_parameters_deterministic or from changing inferred flag) will be reflected.
-forward_model = MTLForwardModel(frequencies, network_params, device=device)
+forward_model = MTLForwardModel(frequencies, network_params, device=device, dtype=torch.float64)
 
 # ---- SVI Inference Engine ----
 inference_config = InferenceConfig(

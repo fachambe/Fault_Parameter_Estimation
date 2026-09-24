@@ -894,6 +894,7 @@ def compute_ATBCRB(snr_db, selected_keys, all_thetas, alpha, network_params, wra
     return atbcrb_dict
 
 def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wrapper_fn, get_inferred_param_order_fn):
+    all_thetas = all_thetas.to(torch.float64)
     param_order_list, p = get_inferred_param_order_fn()
     snr_lin = 10.0 ** (snr_db / 10.0)
     print(f"Computing AT-BCRB with p = {p} parameters")
@@ -962,8 +963,8 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
             .clone()
             .requires_grad_(True)
         )
-        J_D, J_DP = JD_JDP_of_theta(params_flat)
 
+        J_D, J_DP = JD_JDP_of_theta(params_flat)
         # L_P = beta_prior_Lp(params_flat, alpha)
         # with torch.no_grad():
         #     JD_sym = 0.5 * (J_D + J_D.T)
@@ -977,13 +978,13 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
         #     cond_JD = torch.linalg.cond(JD_sym)
         #     cond_JDP = torch.linalg.cond(JDP_sym)
 
-            # print(f"\n--- sample {m} ---")
-            # print("theta =", params_flat.detach().cpu().numpy())
-            # print("eig(J_D)  =", eig_JD.cpu().numpy())
-            # print("cond(J_D) =", cond_JD.item())
-            # print("eig(L_P)  =", eig_LP.cpu().numpy())
-            # print("eig(J_DP) =", eig_JDP.cpu().numpy())
-            # print("cond(J_DP)=", cond_JDP.item())
+        #     print(f"\n--- sample {m} ---")
+        #     print("theta =", params_flat.detach().cpu().numpy())
+        #     print("eig(J_D)  =", eig_JD.cpu().numpy())
+        #     print("cond(J_D) =", cond_JD.item())
+        #     print("eig(L_P)  =", eig_LP.cpu().numpy())
+        #     print("eig(J_DP) =", eig_JDP.cpu().numpy())
+        #     print("cond(J_DP)=", cond_JDP.item())
 
         W = W_of_theta(params_flat)
         d = div_W(params_flat) 
@@ -1012,15 +1013,18 @@ def compute_ATBCRB2(snr_db, selected_keys, all_thetas, alpha, network_params, wr
             + torch.outer(q, q)
         )                               # [p,p]
 
-        # with torch.no_grad():
+        #print("eig(W):", torch.linalg.eigvalsh(W).detach().cpu().numpy())
+        #print("eig(F_sample):", torch.linalg.eigvalsh(F_sample).detach().cpu().numpy())
+
+        with torch.no_grad():
         #     # Accumulate WITHOUT retaining autograd graphs
-        #     sum_W += W.detach()
+            sum_W += W.detach()
         #     sum_F_data += F_data_sample.detach()
         #     sum_F_prior += F_prior_sample.detach()
         #     sum_F_cross += F_cross_sample.detach()
         #     sum_F_div += F_div_sample.detach()
 
-            # sum_F += F_sample.detach()
+            sum_F += F_sample.detach()
         del J_D, J_DP, W, d, g, q, F_sample, params_flat
 
     

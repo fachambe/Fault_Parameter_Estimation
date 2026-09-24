@@ -1,14 +1,13 @@
 # experiments/run_1D_adam_4scenarios.py
 """
-Compare 1D gradient MLE for L1 across 4 scenarios:
+Compare 1D gradient MLE for LF vs SNR across 4 scenarios:
 - High freq (2-10 MHz) + Long cable (L=1000m)
 - Low freq (150-500 kHz) + Long cable (L=1000m)
 - High freq (2-10 MHz) + Short cable (L=100m)
 - Low freq (150-500 kHz) + Short cable (L=100m)
 
-Generates a 2x2 figure showing RMSE vs sqrt(CRLB) for L1 with plotting/plot_1D_adam_4scenarios.py
+Generates a 2x2 figure showing RMSE vs sqrt(CRLB) for LF with plotting/plot_1D_adam_4scenarios.py
 
-This file is self-contained and does not depend on benchmark.yaml.
 """
 import sys, pathlib
 import time
